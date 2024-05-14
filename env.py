@@ -22,15 +22,20 @@ import datetime
 import matplotlib.pyplot as plt
 import torch
 import imageio
+import pygame
 
 
 class ImgRegEnv(gym.Env):
-    metadata = {"render_modes": ["gif"], "render_fps": 25}
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 25}
 
-    def __init__(self, parallel, data_list, save_path):
+    def __init__(self, parallel, data_list, save_path, render_mode='human'):
         super(ImgRegEnv, self).__init__()
 
         self.action_space = spaces.Discrete(8)  # 动作空间
+        self.render_mode = render_mode
+        self.window_size = 256
+        self.window = None
+        self.clock = None
 
         self.observation_space = spaces.Box(  # 观测空间
             low=0.0, high=255.0,  # 归一化后的数据的值域为[0,1]
@@ -57,7 +62,7 @@ class ImgRegEnv(gym.Env):
         self.gt_kps = None
         self.cu_kps = None
 
-        self.gif_list = []
+        self.frame = None
 
         if parallel:
             self.datalist = data_list  # 获取存储在cpu内存中的数据样本
@@ -65,6 +70,7 @@ class ImgRegEnv(gym.Env):
             root_folder = './Expand_image/rotated_images'
             txt_file = './Expand_image/new_affine_matrices.txt'
             self.datalist = preprocess_all_images(root_folder=root_folder, txt_file_path=txt_file)
+            print(f"[Env info]Date Length:{len(self.datalist)}")
 
     def _get_obs(self):
         """
@@ -101,7 +107,8 @@ class ImgRegEnv(gym.Env):
         # root_folder='Expand_image/rotated_images'
         # txt_file = 'Expand_image/new_affine_matrices.txt'
         # preprocess_all_images(root_folder=root_folder, txt_file_path=txt_file, target_size=(256, 256))
-        random_int = random.randint(0, len(self.datalist))
+        random_int = random.randint(0, len(self.datalist)-1)
+        # print(random_int)
         data = self.datalist[random_int]
         reference_img, floating_img, ground_truth_img, ground_truth_matrix, kps = data
         return reference_img, floating_img, ground_truth_img, ground_truth_matrix, kps
@@ -125,14 +132,14 @@ class ImgRegEnv(gym.Env):
         self.distance = self.get_distance()  # 获取初始距离
         observation = self._get_obs()
         info = self._get_info()
-        print(f"[Env info]:Env Reset")
+        # print(f"[Env info]:Env Reset")
 
         return observation, info
 
     def step(self, action):
         """
         调用一次代表智能体和环境做了一次交互
-        :param action=: 神经网络输出的代表动作的序号
+        :param action: 神经网络输出的代表动作的序号
         :return:当前state（基准图像+当前浮动图像）， 奖励， 代表是否结束的变量
         """
         info = self._get_info()
@@ -229,29 +236,56 @@ class ImgRegEnv(gym.Env):
         image = image.convert('RGB')
 
         # 将图像数据添加到队列
-        self.gif_list.append(np.array(image))
+        self.frame = np.array(image)
 
         # 关闭图形以释放内存
         plt.close(fig)
 
+    # def render(self):
+    #     """
+    #     将self.gif_list中的所有帧渲染成一个GIF，并清空self.gif_list。
+    #     """
+    #     # 获取当前时间戳
+    #     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S%f')
+    #     # 创建一个包含时间戳的文件名
+    #     gif_filename = f'environment_animation_{timestamp}.gif'
+    #     gif_path = os.path.join(self.save_path, gif_filename)
+
+    #     # 使用 imageio 库保存 GIF
+    #     imageio.mimsave(gif_path, self.gif_list, duration=0.1, fps=15, subrectangles=True)
+
+    #     # 清空 gif_list 以便存储新的帧
+    #     self.gif_list.clear()
+
+    #     # 打印保存成功的消息
+    #     print(f"Compressed GIF saved to {gif_path}")
     def render(self):
-        """
-        将self.gif_list中的所有帧渲染成一个GIF，并清空self.gif_list。
-        """
-        # 获取当前时间戳
-        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S%f')
-        # 创建一个包含时间戳的文件名
-        gif_filename = f'environment_animation_{timestamp}.gif'
-        gif_path = os.path.join(self.save_path, gif_filename)
+        # 调用内部的_render_frame方法来生成帧
+        frame_array = self.frame
+        # print(frame_array.shape)
 
-        # 使用 imageio 库保存 GIF
-        imageio.mimsave(gif_path, self.gif_list, duration=0.1, fps=15, subrectangles=True)
+        if self.render_mode == "human":
+            # 确保 pygame 已经初始化，并且有一个窗口和时钟
+            if self.window is None:
+                pygame.init()
+                self.window = pygame.display.set_mode((self.window_size, self.window_size))
+                self.clock = pygame.time.Clock()
 
-        # 清空 gif_list 以便存储新的帧
-        self.gif_list.clear()
+            # 将 NumPy 数组转换为 pygame Surface 对象
+            frame_surface = pygame.surfarray.make_surface(frame_array)
 
-        # 打印保存成功的消息
-        print(f"Compressed GIF saved to {gif_path}")
+            # 绘制到窗口
+            self.window.fill((0, 0, 0))  # 清除屏幕
+            self.window.blit(frame_surface, (0, 0))
+            pygame.display.flip()  # 更新整个屏幕的Surface
+
+            # 确保human渲染发生在预定义的帧率
+            self.clock.tick(self.metadata["render_fps"])
+        elif self.render_mode == "rgb_array":
+            # 如果是rgb_array模式，直接返回帧的NumPy数组
+            return frame_array
+        else:
+            raise ValueError("Unsupported render mode: {}".format(self.render_mode))
 
     def close(self):
         """
@@ -262,7 +296,7 @@ class ImgRegEnv(gym.Env):
         self.floating_image = None
         self.ground_truth_image = None
         self.current_floating_image = None
-        self.gif_list.clear()
+        # self.gif_list.clear()
 
         # 如果有打开的文件或网络连接，也应该在这里关闭
         # 示例：
@@ -273,7 +307,7 @@ class ImgRegEnv(gym.Env):
         # 打印一条消息，确认环境已被关闭
         print(f"[Env info]: Environment closed.")
 
-#
+
 # def test_env():
 #     # 假设你的数据列表已经准备好了，这里用一个空列表作为示例
 #     root_folder = './Expand_image/rotated_images'
@@ -281,7 +315,7 @@ class ImgRegEnv(gym.Env):
 #     data_list = preprocess_all_images(root_folder=root_folder, txt_file_path=txt_file, target_size=(256, 256))
 #
 #     # 初始化环境
-#     env = ImgRegEnv(data_list=data_list, parallel=False, save_path="result")
+#     env = ImgRegEnv(data_list=data_list, parallel=False, save_path="result", render_mode="human")
 #
 #     # 重置环境
 #     env.reset()
@@ -296,6 +330,7 @@ class ImgRegEnv(gym.Env):
 #
 #         # 进行一步
 #         observation, reward, terminated, truncated, info = env.step(action)
+#         env.render()
 #         # print(observation)
 #         # print("Shape:", observation.shape)
 #
@@ -306,7 +341,7 @@ class ImgRegEnv(gym.Env):
 #         print(f"Step {step}: Reward = {reward}")
 #
 #     # 渲染当前状态
-#     env.render()
+#     # env.render()
 #     print("Environment has ended.")
 #
 #
