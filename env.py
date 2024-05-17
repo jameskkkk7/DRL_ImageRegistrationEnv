@@ -6,7 +6,6 @@ IMG_REG_Env.v1
 
 date:2024/5/11
 IMG_REG_Env.v2
-TODO: 更改一些图像处理的矩阵的存储位置，分配好内存和显卡，从而实现运行速度的加速
 """
 import io
 import math
@@ -28,14 +27,16 @@ import pygame
 class ImgRegEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 25}
 
-    def __init__(self, parallel, data_list, save_path, render_mode='human'):
+    def __init__(self, parallel, data_list, save_path,  max_step, render_mode='human'):
         super(ImgRegEnv, self).__init__()
 
         self.action_space = spaces.Discrete(8)  # 动作空间
         self.render_mode = render_mode
-        self.window_size = 256
+        self.window_size = 400
         self.window = None
         self.clock = None
+
+        self.max_step = max_step
 
         self.observation_space = spaces.Box(  # 观测空间
             low=0.0, high=255.0,  # 归一化后的数据的值域为[0,1]
@@ -140,13 +141,13 @@ class ImgRegEnv(gym.Env):
         """
         调用一次代表智能体和环境做了一次交互
         :param action: 神经网络输出的代表动作的序号
-        :return:当前state（基准图像+当前浮动图像）， 奖励， 代表是否结束的变量
+        :return:当前state(基准图像+当前浮动图像), 奖励， 代表是否结束的变量
         """
         info = self._get_info()
-        if self.round_num <= 10 and torch.sum(self.current_floating_image) != 0:
+        if self.round_num <= self.max_step and torch.sum(self.current_floating_image) != 0:
             if self.distance <= 1:
                 # 如果没到达结束回合但是上一轮游戏图像配准完成,或者初始图像已经很准了
-                reward = 10
+                reward = 100
                 print(f"[Env info]: Success!")
                 observation = self._get_obs()
                 return observation, reward, True, False, info
@@ -165,9 +166,9 @@ class ImgRegEnv(gym.Env):
                 self._render_frame()
                 # 这里的奖励使用上一个时刻的距离和这一个时刻距离的差值，如果距离变小了那就是正数(奖励)，距离变大了就是负数（惩罚）
                 observation = self._get_obs()
-                return observation, distance_0 - self.distance, False, False, info
+                return observation, (distance_0 - self.distance), False, False, info
         else:  # 到达结束回合的情况，或者图像全黑
-            reward = -10
+            reward = -50
             observation = self._get_obs()
             return observation, reward, True, False, info
 
@@ -207,6 +208,16 @@ class ImgRegEnv(gym.Env):
             ax.set_title(title)
             ax.axis('off')
 
+        mixed_ax = axes[0, 2]  # 选择(0, 2)位置的轴
+        ref_img_np = (self.reference_image * 255).squeeze(0).byte().numpy().astype(np.uint8)
+        cu_flt_img_np = (self.current_floating_image * 255).squeeze(0).byte().numpy().astype(np.uint8)
+
+        # 使用alpha混合两个图像
+        mixed_image = 0.5 * ref_img_np + 0.5 * cu_flt_img_np
+        mixed_ax.imshow(mixed_image.astype(np.uint8), cmap='gray')
+        mixed_ax.set_title('Mixed Image')
+        mixed_ax.axis('off')
+
         # Plot the SIFT feature points only if they are within the canvas
         def plot_features(ax, features, title):
             # 过滤掉坐标超出图像边界的点
@@ -224,6 +235,12 @@ class ImgRegEnv(gym.Env):
         plot_features(axes[2, 1], self.gt_kps, 'Ground Truth Keypoints')
         plot_features(axes[2, 2], self.cu_kps, 'Current Keypoints')
 
+        distance_str = f'Distance: {self.distance:.4f}'
+        for ax in axes.flatten():
+            # 将文本放置在右上角，bbox 参数用于设置文本框的属性
+            ax.text(1, 1, distance_str, transform=ax.transAxes, fontsize=12,
+                    ha='right', va='top', bbox=dict(facecolor='white', alpha=0.5))
+
         buf = io.BytesIO()
         # 可以指定 DPI 来降低分辨率，例如 50
         fig.savefig(buf, format='png', dpi=50, bbox_inches='tight')
@@ -235,8 +252,12 @@ class ImgRegEnv(gym.Env):
         # 去除Alpha通道，只保留RGB通道
         image = image.convert('RGB')
 
-        # 将图像数据添加到队列
         self.frame = np.array(image)
+
+        # 将图像数据添加到队列
+        if self.render_mode == "human":
+            self.frame = np.flipud(self.frame)
+            self.frame = np.rot90(self.frame, -1)
 
         # 关闭图形以释放内存
         plt.close(fig)
@@ -307,7 +328,7 @@ class ImgRegEnv(gym.Env):
         # 打印一条消息，确认环境已被关闭
         print(f"[Env info]: Environment closed.")
 
-
+#
 # def test_env():
 #     # 假设你的数据列表已经准备好了，这里用一个空列表作为示例
 #     root_folder = './Expand_image/rotated_images'
@@ -315,7 +336,7 @@ class ImgRegEnv(gym.Env):
 #     data_list = preprocess_all_images(root_folder=root_folder, txt_file_path=txt_file, target_size=(256, 256))
 #
 #     # 初始化环境
-#     env = ImgRegEnv(data_list=data_list, parallel=False, save_path="result", render_mode="human")
+#     env = ImgRegEnv(data_list=data_list, parallel=False, max_step=500, save_path="result", render_mode="human")
 #
 #     # 重置环境
 #     env.reset()
@@ -326,7 +347,9 @@ class ImgRegEnv(gym.Env):
 #     while not terminated:
 #         # 这里假设action_tenser是一个从神经网络获取的动作张量，为了测试，我们随机生成一个动作
 #         # 在实际应用中，你需要根据你的神经网络模型来生成这个动作
-#         action = np.random.randint(8)
+#         # action = np.random.randint(8)
+#         # 请求用户输入动作
+#         action = int(input("Enter action (0-7): "))
 #
 #         # 进行一步
 #         observation, reward, terminated, truncated, info = env.step(action)
@@ -347,4 +370,4 @@ class ImgRegEnv(gym.Env):
 #
 # # 运行测试函数
 # test_env()
-
+#

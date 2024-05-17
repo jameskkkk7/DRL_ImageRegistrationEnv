@@ -133,7 +133,7 @@ def preprocess_all_images(root_folder, txt_file_path, target_size=(256, 256)):
 # 以上部分运算由CPU执行，以下的运算必须由GPU执行
 
 
-def generate_affine_matrix_fixed(one_hot_action, translation=5, rotation=5, scale=0.1, device='cpu'):
+def generate_affine_matrix_fixed(one_hot_action, translation=2, rotation=2, scale=0.1, device='cpu'):
     """
     Generate an affine matrix corresponding to a specified action with fixed values.
 
