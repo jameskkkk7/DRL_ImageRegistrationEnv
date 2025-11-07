@@ -7,35 +7,89 @@ import torch
 from utils import affine_3x3_to_2x3, affine_2x3_to_3x3, get_sift_features, tensor2numpy, numpy2tensor
 
 
-def load_path_dic(file_path):
-    data_dict = {}
-    with open(file_path, "r", encoding="GBK") as file:
-        for line in file:
-            match_img1 = re.search(r"图片1名称: ([^,]+)", line)
-            match_img2 = re.search(r"图片2名称: ([^,]+)", line)
-            match_matrix = re.search(r"Affine matrix: (\[\[.*?\]\])", line)
+# def load_path_dic(file_path):
+#     data_dict = {}
+#     with open(file_path, "r", encoding="GBK") as file:
+#         for line in file:
+#             match_img1 = re.search(r"图片1名称: ([^,]+)", line)
+#             match_img2 = re.search(r"图片2名称: ([^,]+)", line)
+#             match_matrix = re.search(r"Affine matrix: (\[\[.*?\]\])", line)
+#
+#             if match_img1 and match_img2 and match_matrix:
+#                 folder_name = match_img1.group(1).split("_")[0]
+#                 img_name1 = os.path.join(
+#                     "HE_image", folder_name, match_img1.group(1).strip() + ".tif"
+#                 )
+#                 img_name2 = os.path.join(
+#                     "CDX_image", folder_name, match_img2.group(1).strip() + ".tif"
+#                 )
+#
+#                 matrix_str = match_matrix.group(1)
+#                 matrix_list = eval(matrix_str)
+#                 matrix_array = np.array(matrix_list)
+#
+#                 if matrix_array.shape == (3, 3):
+#                     matrix_array = matrix_array[:2, :3]
+#
+#                 data_dict[img_name1] = {
+#                     "img_name2": img_name2,
+#                     "matrix": matrix_array,
+#                 }
+#     return data_dict
 
-            if match_img1 and match_img2 and match_matrix:
-                folder_name = match_img1.group(1).split("_")[0]
-                img_name1 = os.path.join(
-                    "HE_image", folder_name, match_img1.group(1).strip() + ".tif"
-                )
-                img_name2 = os.path.join(
-                    "CDX_image", folder_name, match_img2.group(1).strip() + ".tif"
-                )
 
-                matrix_str = match_matrix.group(1)
-                matrix_list = eval(matrix_str)
-                matrix_array = np.array(matrix_list)
-
-                if matrix_array.shape == (3, 3):
-                    matrix_array = matrix_array[:2, :3]
-
-                data_dict[img_name1] = {
-                    "img_name2": img_name2,
-                    "matrix": matrix_array,
-                }
-    return data_dict
+# def preprocess_image(img_path, do_sift=False):
+#     """
+#     读取图像路径，进行一系列变换之后返回图像的numpy数组
+#     :param do_sift: 是否进行特征点检测
+#     :param img_path: 图像的路径
+#     :return: 变换后的图像numpy数组，和kps
+#     """
+#     # 读取图像，并保留Alpha通道
+#     img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+#
+#     if img.shape[2] == 4:  # 如果包含Alpha通道
+#         # 提取Alpha通道
+#         alpha_channel = img[:, :, 3]
+#
+#         # 创建一个黑色背景
+#         bgr = img[:, :, :3]
+#         mask = alpha_channel == 0
+#
+#         # 将透明区域设置为黑色
+#         bgr[mask] = [0, 0, 0]
+#
+#         # 转换为灰度图像
+#         img = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+#
+#         print("test1")
+#         print(img.shape)
+#
+#     elif img.shape[2] == 3:
+#         # 如果图像没有Alpha通道，直接转换为灰度图
+#         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+#
+#     elif len(img.shape) == 2:
+#         # 如果已经是灰度图，直接使用
+#         pass
+#
+#     # 进行高斯模糊
+#     img_trans = cv2.GaussianBlur(img, (5, 5), 0)
+#
+#     # 进行双边滤波
+#     img_trans = cv2.bilateralFilter(img_trans, 15, 75, 75)
+#
+#     # 进行自适应阈值处理
+#     # img_trans = cv2.adaptiveThreshold(img_trans, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 11, 2)
+#
+#     # 正规化图像
+#     img_trans = img_trans / 255.0
+#
+#     if do_sift:
+#         kps = get_sift_features(img_trans)
+#         return img_trans, kps
+#     else:
+#         return img_trans
 
 
 def preprocess_image(img_path, do_sift=False):
@@ -43,18 +97,54 @@ def preprocess_image(img_path, do_sift=False):
     读取图像路径，进行一系列变换之后返回图像的numpy数组
     :param do_sift: 是否进行特征点检测
     :param img_path: 图像的路径
-    :return: 变换后的图像numpy数组，和kps
+    :return: 变换后的图像numpy数组，和kps（如果do_sift为True）
     """
-    img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-    img_trans = cv2.blur(img, (4, 4))  # 高斯模糊
-    img_trans = cv2.adaptiveThreshold(img_trans, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 11, 2)
-    img_trans = cv2.bilateralFilter(img_trans, 15, 0, 255)
-    img_trans = img_trans / 255.0
+    # 以cv2.IMREAD_UNCHANGED标志读取图像，以保留alpha通道
+    img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+
+    if img.shape[2] == 4:
+        # 分离出BGR和Alpha通道
+        b, g, r, alpha = cv2.split(img)
+
+        # 生成黑色背景的BGR图像
+        b_black = 0 * np.ones_like(b, dtype=np.uint8)
+        g_black = 0 * np.ones_like(g, dtype=np.uint8)
+        r_black = 0 * np.ones_like(r, dtype=np.uint8)
+
+        # 计算新的图像，将透明部分替换为黑色背景
+        b = (b * (alpha / 255.0) + b_black * (1 - alpha / 255.0)).astype(np.uint8)
+        g = (g * (alpha / 255.0) + g_black * (1 - alpha / 255.0)).astype(np.uint8)
+        r = (r * (alpha / 255.0) + r_black * (1 - alpha / 255.0)).astype(np.uint8)
+
+        # 合并BGR三个通道
+        img = cv2.merge([b, g, r])
+    else:
+        # 如果不包含alpha通道，直接使用读取的图像
+        img = img
+
+    # 将图像转换为3通道，去除alpha通道
+    # img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+    # 转换为灰度图像
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # 高斯模糊
+    # img = cv2.blur(img, (4, 4))
+
+    # 自适应阈值
+    # _, img_thresh = cv2.threshold(img, 50, 255, cv2.THRESH_BINARY)
+
+    # 双边滤波
+    # img_trans = cv2.bilateralFilter(img_thresh, 15, 0, 255)
+
+    # 归一化到[0, 1]
+    # img_trans = img_trans / 255.0
+
     if do_sift:
         kps = get_sift_features(img)
-        return img_trans, kps
+        return img, kps
     else:
-        return img_trans
+        return img
 
 
 def resize_image(img, target_size=(256, 256)):
@@ -78,62 +168,134 @@ def apply_affine_transform(img, matrix):
     transformed_img = cv2.warpAffine(img,
                                      matrix,
                                      (1024, 1024),  # 原始大小，为了配合gt变换矩阵
-                                     flags=cv2.INTER_LINEAR,
-                                     borderMode=cv2.BORDER_REPLICATE)
+                                     # flags=cv2.INTER_LINEAR,
+                                     borderValue=(0, 0, 0))
     return transformed_img
 
 
-def preprocess_all_images(root_folder, txt_file_path, target_size=(256, 256)):
+def get_file_dictionary(folder_path):
+    """返回一个字典，其中包括所有图像文件的文件名和它们的完整路径"""
+    file_dict = {}
+    # 定义支持的图像文件扩展名
+    valid_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.gif', '.tif')
+    
+    for root, dirs, files in os.walk(folder_path):
+        for file in files:
+            # 获取文件的扩展名，并检查是否是有效的图像文件
+            _, ext = os.path.splitext(file)
+            if ext.lower() in valid_extensions:
+                file_path = os.path.join(root, file)
+                file_dict[file] = file_path
+    
+    return file_dict
+
+def generate_random_affine_matrix(scale_variation=0.2, rotation_variation=30, translation_variation=60):
     """
-    :param root_folder:
-    :param txt_file_path:
+    Generate a random affine transformation matrix that includes scaling, rotation,
+    and translation only.
+
+    :param scale_variation: Maximum percentage variation of scale (0.1 for 10%)
+    :param rotation_variation: Maximum rotation in degrees
+    :param translation_variation: Max translation in pixels
+    :return: A 3x3 affine transformation matrix
+    """
+    # 随机生成缩放因子，1 ± scale_variation
+    sx = 1 + np.random.uniform(-scale_variation, scale_variation)
+
+    # 随机生成旋转角度
+    rotation = np.random.uniform(-rotation_variation, rotation_variation)
+    theta = np.radians(rotation)
+
+    # 随机生成平移参数
+    tx = np.random.uniform(-translation_variation, translation_variation)
+    ty = np.random.uniform(-translation_variation, translation_variation)
+
+    # 构建旋转矩阵
+    cos_theta, sin_theta = np.cos(theta), np.sin(theta)
+    rotation_matrix = np.array([
+        [cos_theta, -sin_theta, 0],
+        [sin_theta, cos_theta, 0],
+        [0, 0, 1]
+    ])
+
+    # 构建缩放矩阵
+    scale_matrix = np.array([
+        [sx, 0, 0],
+        [0, sx, 0],
+        [0, 0, 1]
+    ])
+
+    # 构建平移矩阵
+    translation_matrix = np.array([
+        [1, 0, tx],
+        [0, 1, ty],
+        [0, 0, 1]
+    ])
+
+    # 组合矩阵：先缩放，再旋转，最后平移
+    affine_matrix = translation_matrix @ rotation_matrix @ scale_matrix
+    affine_matrix = affine_3x3_to_2x3(affine_matrix)
+
+    return affine_matrix
+
+
+def preprocess_all_images(he_folder_path, cdx_folder_path, target_size=(256, 256)):
+    """
+    :param cdx_folder_path: cdx图像的路径
+    :param he_folder_path: he图像的路径
     :param target_size:
     :return:
     """
-    data_dict = load_path_dic(txt_file_path)
-    img_name1_list = list(data_dict.keys())
     all_img_data = []
+    he_files = get_file_dictionary(he_folder_path)
+    # for key, value in he_files.items():
+        # print(key, ":", value)
+    cdx_files = get_file_dictionary(cdx_folder_path)
+    # for key, value in cdx_files.items():
+    #     print(key, ":", value)
 
-    for img_name1 in img_name1_list:
-        img_name2 = data_dict[img_name1]['img_name2']
-        matrix = data_dict[img_name1]['matrix']
-        # 加载1024原图
-        img1 = preprocess_image(os.path.join(root_folder, img_name1))
-        img2, kps = preprocess_image(os.path.join(root_folder, img_name2), do_sift=True)
-        # 变换
-        img2_transformed = apply_affine_transform(img2, matrix)
+    for file_name in he_files:
+        if file_name in cdx_files:
+            # print("test")
+            # 得到图像路径s
+            img1_path = file_name
+            img2_path = file_name
+            # 加载1024原图
+            img1 = preprocess_image(os.path.join(he_folder_path, img1_path))
+            img2, kps = preprocess_image(os.path.join(cdx_folder_path, img2_path), do_sift=True)
+            # 变换
+            matrix = generate_random_affine_matrix()
+            img2_transformed = apply_affine_transform(img2, matrix)
 
-        # resize到同一个大小
-        img1_resized = resize_image(img1, target_size)
-        img2_resized = resize_image(img2, target_size)
-        img2_transformed_resized = resize_image(img2_transformed, target_size)
+            # resize到同一个大小
+            img1_resized = resize_image(img1, target_size)
+            img2_resized = resize_image(img2, target_size)
+            img2_transformed_resized = resize_image(img2_transformed, target_size)
+            matrix = affine_2x3_to_3x3(matrix)
+            matrix_inv = np.linalg.inv(matrix)
+            # matrix_inv = matrix
 
-        # 在最后将numpy数组转换为张量
-        img1_resized_tensor = torch.from_numpy(img1_resized).unsqueeze(0).float()
-        img2_resized_tensor = torch.from_numpy(img2_resized).unsqueeze(0).float()
-        img2_transformed_resized_tensor = torch.from_numpy(img2_transformed_resized).unsqueeze(0).float()
-        matrix = affine_2x3_to_3x3(matrix)
-        scale_m = np.array([[0.25, 0, 0], [0, 0.25, 0], [0, 0, 1]])
-        matrix = np.linalg.inv(scale_m @ np.linalg.inv(scale_m @ matrix))
-        matrix_tenser = torch.from_numpy(matrix).float()
-        # 将数据组织成所需的格式
-        all_img_data.append((
-            img1_resized_tensor,  # reference_img
-            img2_resized_tensor,  # floating_img
-            img2_transformed_resized_tensor,  # ground_truth_img
-            matrix_tenser,  # ground_truth_matrix
-            kps  # floating_img_kps_np
-            # TODO:这里的matrix需要做变换，才能符合被resize之后的图片,依旧有问题
-        ))
+            scale_m = np.array([[0.25, 0, 0], [0, 0.25, 0], [0, 0, 1]])
+            matrix = np.linalg.inv(scale_m @ np.linalg.inv(scale_m @ matrix_inv))
+            matrix_tenser = torch.from_numpy(matrix).float()
+
+            # 在最后将numpy数组转换为张量
+            img1_resized_tensor = torch.from_numpy(img1_resized).unsqueeze(0).float()
+            img2_resized_tensor = torch.from_numpy(img2_resized).unsqueeze(0).float()
+            img2_transformed_resized_tensor = torch.from_numpy(img2_transformed_resized).unsqueeze(0).float()
+            # 将数据组织成所需的格式
+            all_img_data.append((
+                img1_resized_tensor,  # reference_img
+                img2_transformed_resized_tensor,  # floating_img
+                img2_resized_tensor,  # ground_truth_img
+                matrix_tenser,  # ground_truth_matrix
+                kps  # floating_img_kps_np
+            ))
 
     return all_img_data
 
 
-# ----------------------------------------------------------------------------------------------------------------------
-# 以上部分运算由CPU执行，以下的运算必须由GPU执行
-
-
-def generate_affine_matrix_fixed(one_hot_action, translation=2, rotation=2, scale=0.1, device='cpu'):
+def generate_affine_matrix_fixed(one_hot_action, translation=1, rotation=1, scale=0.01, device='cpu'):
     """
     Generate an affine matrix corresponding to a specified action with fixed values.
 
@@ -244,7 +406,8 @@ def apply_affine_transform_cv2(image, affine_matrix):
         image,
         affine_matrix,  # Use only the 2x3 part of the matrix
         (width, height),  # Output image size
-        flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR  # Use inverse mapping and bilinear interpolation
+        # flags=cv2.INTER_LINEAR
+        borderValue=(0, 0, 0)
     )
 
     transformed_image = numpy2tensor(transformed_image).unsqueeze(0)

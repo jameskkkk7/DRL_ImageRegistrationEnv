@@ -1,10 +1,12 @@
-import datetime
 import os
 import random
-
+import os
+# import imageio
 import cv2
 import numpy as np
 import torch
+
+from datetime import datetime
 from matplotlib import pyplot as plt
 
 
@@ -43,10 +45,10 @@ def affine_2x3_to_3x3(affine_2x3):
     将2x3的仿射矩阵转换为3x3
 
     Args:
-        affine_2x3: 输入的2x3仿射矩阵，可以是torch.tensor或numpy数组
+        affine_2x3: 输入的2x3仿射矩阵,可以是torch.tensor或numpy数组
 
     Returns:
-        输出的3x3仿射矩阵，数据格式与输入相同
+        输出的3x3仿射矩阵,数据格式与输入相同
     """
     if isinstance(affine_2x3, torch.Tensor):
         affine_3x3 = torch.zeros((3, 3), dtype=affine_2x3.dtype, device=affine_2x3.device)
@@ -58,7 +60,7 @@ def affine_2x3_to_3x3(affine_2x3):
     elif isinstance(affine_2x3, np.ndarray):
         return np.vstack([affine_2x3, np.array([0, 0, 1], dtype=affine_2x3.dtype)])
     else:
-        raise TypeError("输入数据类型不支持，只能是torch.Tensor或numpy数组")
+        raise TypeError("输入数据类型不支持,只能是torch.Tensor或numpy数组")
 
 
 def affine_3x3_to_2x3(affine_3x3):
@@ -66,10 +68,10 @@ def affine_3x3_to_2x3(affine_3x3):
     将3x3的仿射矩阵转换为2x3
 
     Args:
-        affine_3x3: 输入的3x3仿射矩阵，可以是torch.tensor或numpy数组
+        affine_3x3: 输入的3x3仿射矩阵,可以是torch.tensor或numpy数组
 
     Returns:
-        输出的2x3仿射矩阵，数据格式与输入相同
+        输出的2x3仿射矩阵,数据格式与输入相同
     """
 
     if isinstance(affine_3x3, torch.Tensor):
@@ -77,7 +79,7 @@ def affine_3x3_to_2x3(affine_3x3):
     elif isinstance(affine_3x3, np.ndarray):
         return affine_3x3[:2, :]
     else:
-        raise TypeError("输入数据类型不支持，只能是torch.Tensor或numpy数组")
+        raise TypeError("输入数据类型不支持,只能是torch.Tensor或numpy数组")
 
 
 def tenser2index(tensor):
@@ -91,7 +93,7 @@ def tenser2index(tensor):
         onehot_tensor: One-hot 编码表示的张量。
         max_index: 最大值索引。
     """
-    # 确定张量的形状，以便在创建One-hot编码时保持相同的形状
+    # 确定张量的形状,以便在创建One-hot编码时保持相同的形状
     tensor = tensor.squeeze(0)
     shape = tensor.shape
     # print(tensor, shape)
@@ -108,16 +110,16 @@ def tenser2index(tensor):
 
 def same_seeds(seed):
     """
-    保证整个环境中的随机种子统一，保证实验的可复现能力
+    保证整个环境中的随机种子统一,保证实验的可复现能力
 
     :param seed: 你需要的种子
     :return: None
     """
-    # 控制整个工程的随机种子相同，保证复现能力。
+    # 控制整个工程的随机种子相同,保证复现能力。
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    # 如果CUDA可用，也为CUDA设置相同的随机种子
+    # 如果CUDA可用,也为CUDA设置相同的随机种子
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
@@ -127,12 +129,12 @@ def same_seeds(seed):
 
 def create_experiment_folder(base_path='./result'):
     """
-    根据时间生成一个记录当前实验数据的文件夹，返回其路径
+    根据时间生成一个记录当前实验数据的文件夹,返回其路径
 
     :param: base_path 基础路径
     :return: 生成的路径
     """
-    current_time = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     save_path = os.path.join(base_path, current_time)
     os.makedirs(save_path, exist_ok=True)
     return save_path
@@ -248,3 +250,4 @@ def visualize_losses(train_losses, gpu_id, save_path):
     plt.legend()
     plt.savefig(save_path+"/Loss.png")  # Save the figure
     plt.close()  # Close the plotting window to free up memory
+

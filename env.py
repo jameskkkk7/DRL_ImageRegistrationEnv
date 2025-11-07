@@ -7,27 +7,28 @@ IMG_REG_Env.v1
 date:2024/5/11
 IMG_REG_Env.v2
 """
+import sys
+sys.path.append('/home/james/TianshouImgReg/ImgRegEnv')
 import io
 import math
-import os
+from collections import deque
 import random
 import gymnasium as gym
 import numpy as np
 from PIL import Image
 from gymnasium import spaces
-from utils import tenser2index, transform_key_points, count_distance
+from utils import transform_key_points, count_distance
 from image_preprocess import move, preprocess_all_images
-import datetime
 import matplotlib.pyplot as plt
 import torch
-import imageio
 import pygame
+import math
 
 
 class ImgRegEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 25}
 
-    def __init__(self, parallel, data_list, save_path,  max_step, render_mode='human'):
+    def __init__(self, parallel, data_list, save_path, max_step, render_mode='human', env_mode="Easy"):
         super(ImgRegEnv, self).__init__()
 
         self.action_space = spaces.Discrete(8)  # 动作空间
@@ -35,6 +36,18 @@ class ImgRegEnv(gym.Env):
         self.window_size = 400
         self.window = None
         self.clock = None
+
+        self.rever_actions = {0: 1, 1: 0, 2: 3, 3: 2, 4: 5, 5: 4, 6: 7, 7: 6}  # 逆动作字典
+
+        self.history = []  # 添加一个属性来存储动作历史
+        self.reward_history = []  # 添加一个属性来存储动作历史对应的奖励
+        self.one_time_rewards = {
+            5: False,
+            4.5: False,
+            4: False,
+            3.5: False,
+            3: False
+        }
 
         self.max_step = max_step
 
@@ -53,7 +66,7 @@ class ImgRegEnv(gym.Env):
         self.ground_truth_image = torch.zeros(1, 256, 256)  # 地标图像
         self.current_floating_image = torch.zeros(1, 256, 256)  # 计算过程中的浮动图像
 
-        self.ground_truth_matrix = torch.eye(3)  # 基准矩阵
+        # self.ground_truth_matrix = torch.eye(3)  # 基准矩阵
         self.current_matrix = torch.eye(3)  # 计算过程中的变换矩阵
 
         self.distance = torch.zeros(1)  # 当前环境中两张图像的距离
@@ -68,9 +81,14 @@ class ImgRegEnv(gym.Env):
         if parallel:
             self.datalist = data_list  # 获取存储在cpu内存中的数据样本
         else:
-            root_folder = './Expand_image/rotated_images'
-            txt_file = './Expand_image/new_affine_matrices.txt'
-            self.datalist = preprocess_all_images(root_folder=root_folder, txt_file_path=txt_file)
+            if env_mode == "Easy":
+                he_folder = '/home/james/TianshouImgReg/ImgRegEnv/Data/Cricle_img'
+                cdx_folder = '/home/james/TianshouImgReg/ImgRegEnv/Data/Cricle_img'
+            else:
+                he_folder = '/home/james/TianshouImgReg/ImgRegEnv/Data/HE_image'
+                cdx_folder = '/home/james/TianshouImgReg/ImgRegEnv/Data/CDX_image'
+
+            self.datalist = preprocess_all_images(he_folder_path=he_folder, cdx_folder_path=cdx_folder)
             print(f"[Env info]Date Length:{len(self.datalist)}")
 
     def _get_obs(self):
@@ -108,7 +126,7 @@ class ImgRegEnv(gym.Env):
         # root_folder='Expand_image/rotated_images'
         # txt_file = 'Expand_image/new_affine_matrices.txt'
         # preprocess_all_images(root_folder=root_folder, txt_file_path=txt_file, target_size=(256, 256))
-        random_int = random.randint(0, len(self.datalist)-1)
+        random_int = random.randint(0, len(self.datalist) - 1)
         # print(random_int)
         data = self.datalist[random_int]
         reference_img, floating_img, ground_truth_img, ground_truth_matrix, kps = data
@@ -120,12 +138,21 @@ class ImgRegEnv(gym.Env):
         :return:
         """
         super().reset(seed=seed)  # 不懂
+        self.one_time_rewards = {
+            5: False,
+            4.5: False,
+            4: False,
+            3.5: False,
+            3: False
+        }
+        self.history = []
+        self.reward_history = []
         (
             self.reference_image,
             self.floating_image,
             self.ground_truth_image,
             self.ground_truth_matrix,
-            self.kps
+            self.gt_kps
          ) = self.dataloader()
         self.round_num = 0
         self.current_floating_image = self.floating_image
@@ -137,6 +164,11 @@ class ImgRegEnv(gym.Env):
 
         return observation, info
 
+    # def _check_if_mostly_zeros(self, image, ratio=0.8):
+    #     total_pixels = image.numel()
+    #     zero_pixels = torch.sum(image == 0)
+    #     return (zero_pixels / total_pixels) >= ratio
+
     def step(self, action):
         """
         调用一次代表智能体和环境做了一次交互
@@ -144,11 +176,15 @@ class ImgRegEnv(gym.Env):
         :return:当前state(基准图像+当前浮动图像), 奖励， 代表是否结束的变量
         """
         info = self._get_info()
+        # 初始化一次性奖励标志
+        # print(f"[Env info]{action}")
+
         if self.round_num <= self.max_step and torch.sum(self.current_floating_image) != 0:
-            if self.distance <= 1:
+            if self.distance <= 2.5:
                 # 如果没到达结束回合但是上一轮游戏图像配准完成,或者初始图像已经很准了
                 reward = 100
                 print(f"[Env info]: Success!")
+                self.reward_history.append(reward)
                 observation = self._get_obs()
                 return observation, reward, True, False, info
             else:  # 配准没有结束，继续配准
@@ -164,22 +200,90 @@ class ImgRegEnv(gym.Env):
                 self.distance = self.get_distance()
                 self.round_num += 1
                 self._render_frame()
-                # 这里的奖励使用上一个时刻的距离和这一个时刻距离的差值，如果距离变小了那就是正数(奖励)，距离变大了就是负数（惩罚）
+                reward_sign, sign, punish = self.enqueue_action(action)
+                # print(f"penalty:{penalty}")
+                # 计算奖励
+                if reward_sign:
+                    if (distance_0 - self.distance) <= 0:
+                        base = 0
+                    else:
+                        # base = distance_0 - self.distance
+                        base = 1  # 二值化奖励
+                else:
+                    base = 0
+
+                reward = base + punish
+
+                # 检查一次性奖励条件
+                for threshold in self.one_time_rewards:
+                    if self.distance <= threshold and not self.one_time_rewards[threshold]:
+                        reward += 20  # 假设每个一次性奖励是50分,累加在原本的奖励上面
+                        self.one_time_rewards[threshold] = True  # 标记为已领取
+                        print(f"[Env info]: One-time reward of 50 for distance <= {threshold}!")
+
                 observation = self._get_obs()
-                return observation, (distance_0 - self.distance), False, False, info
+                if sign:
+                    self.reward_history.append(reward)
+                    self.history.append(action)
+
+                # print("action list:")
+                # for i in range(len(self.history)):
+                #     print(self.history[i])
+
+                # print("reward list:")
+                # for i in range(len(self.reward_history)):
+                #     print(self.reward_history[i])
+
+                return (observation,
+                        reward,
+                        False, False, info)
+
         else:  # 到达结束回合的情况，或者图像全黑
-            reward = -50
+            reward = -100
+            self.reward_history.append(reward)
             observation = self._get_obs()
-            return observation, reward, True, False, info
+            return (observation,
+                    reward,
+                    True, False, info)
+
+    def enqueue_action(self, action):
+        # 检查动作是否合法
+        if action not in self.rever_actions:
+            print(f"Invalid action: {action}")
+            return None
+
+        # 查找逆动作
+        inverse_action = self.rever_actions.get(action)
+
+        punish = 0
+        sign = True  # 决定当前动作和奖励是否入队
+        reward_sign = True  # 决定当前奖励是非奖励给智能体
+        if inverse_action in self.history:
+            # 从后向前遍历，找到逆动作
+            for i in range(len(self.history) - 1, -1, -1):
+                if self.history[i] == inverse_action:
+                    punish = -self.reward_history[i]
+                    if punish == 0:
+                        reward_sign = False
+                    del self.history[i]
+                    del self.reward_history[i]
+                    sign = False
+                    break  # 找到逆动作后不需要继续遍历
+                else:
+                    punish = 0
+
+        return reward_sign, sign, punish
 
     def get_distance(self):
         """
 
         :return: 返回当前环境的奖励
         """
-        gt_m = torch.linalg.inv(self.ground_truth_matrix)
-        self.gt_kps = transform_key_points(self.kps, gt_m)  # 因为一些奇怪的bug
-        self.cu_kps = transform_key_points(self.kps, self.current_matrix)
+        # gt_m = torch.linalg.inv(self.ground_truth_matrix)
+        gt_m = self.ground_truth_matrix
+
+        self.kps = transform_key_points(self.gt_kps, gt_m)  # 因为一些奇怪的bug
+        self.cu_kps = transform_key_points(self.kps,  torch.inverse(self.current_matrix))
         reward = count_distance(self.gt_kps, self.cu_kps)
         reward = math.log(reward + 1)
         return reward
@@ -223,13 +327,15 @@ class ImgRegEnv(gym.Env):
             # 过滤掉坐标超出图像边界的点
             valid_features = [(x, y) for x, y in features if 0 <= x < image_width and 0 <= y < image_height]
             # 绘制特征点
-            ax.scatter([p[0] for p in valid_features], [image_height - p[1] for p in valid_features], color='red', marker='x')  # 注意y坐标的处理
+            ax.scatter([p[0] for p in valid_features], [image_height - p[1] for p in valid_features], color='red',
+                       marker='x')  # 注意y坐标的处理
             ax.set_title(title)
             # 设置坐标轴的范围以适应画布大小，并反转y轴
             ax.set_xlim(0, image_width)
             ax.set_ylim(image_height - 1, 0)  # 注意y轴的取值范围颠倒了
             ax.invert_yaxis()  # 反转y轴
             ax.axis('off')
+
         # 假设self.kps, self.gt_kps, self.cu_kps是[x, y]坐标列表
         plot_features(axes[2, 0], self.kps, 'Detected Keypoints')
         plot_features(axes[2, 1], self.gt_kps, 'Ground Truth Keypoints')
@@ -328,16 +434,17 @@ class ImgRegEnv(gym.Env):
         # 打印一条消息，确认环境已被关闭
         print(f"[Env info]: Environment closed.")
 
-#
+
 # def test_env():
 #     # 假设你的数据列表已经准备好了，这里用一个空列表作为示例
-#     root_folder = './Expand_image/rotated_images'
-#     txt_file = './Expand_image/new_affine_matrices.txt'
-#     data_list = preprocess_all_images(root_folder=root_folder, txt_file_path=txt_file, target_size=(256, 256))
-#
+#     # he_folder = './Expand_image/rotated_images/HE_image'
+#     # cdx_folder = './Expand_image/rotated_images/_image'
+#     #
+#     # data_list = preprocess_all_images(he_folder_path=he_folder, cdx_folder_path=cdx_folder)
+
 #     # 初始化环境
-#     env = ImgRegEnv(data_list=data_list, parallel=False, max_step=500, save_path="result", render_mode="human")
-#
+#     env = ImgRegEnv(data_list=None, parallel=False, max_step=500, save_path="result", render_mode="human")
+
 #     # 重置环境
 #     env.reset()
 #     # env.render()
@@ -350,24 +457,34 @@ class ImgRegEnv(gym.Env):
 #         # action = np.random.randint(8)
 #         # 请求用户输入动作
 #         action = int(input("Enter action (0-7): "))
-#
+
 #         # 进行一步
 #         observation, reward, terminated, truncated, info = env.step(action)
 #         env.render()
 #         # print(observation)
 #         # print("Shape:", observation.shape)
-#
+
 #         # 更新步骤计数
 #         step += 1
-#
+
 #         # 打印奖励信息
 #         print(f"Step {step}: Reward = {reward}")
-#
+
 #     # 渲染当前状态
 #     # env.render()
 #     print("Environment has ended.")
-#
-#
+
+
 # # 运行测试函数
 # test_env()
-#
+
+
+
+# # 创建环境实例，这里假设其他参数已经正确设置
+# env = ImgRegEnv(parallel=False, data_list=[], save_path="result", max_step=500, render_mode="human")
+
+# # 测试 enqueue_action 方法
+# print(env.enqueue_action('0'))  # 应该返回0，因为'1'的逆动作'0'不在历史记录中
+# print(env.enqueue_action('2'))  # 应该返回0，因为'2'没有逆动作
+# print(env.enqueue_action('1'))  # 应该返回0，因为'3'的逆动作'2'不在历史记录中
+# print(env.enqueue_action('1'))  # 应该返回1 / math.sqrt(1)，因为'1'的逆动作'0'是上一个动作
