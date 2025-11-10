@@ -95,13 +95,11 @@ class ImgRegEnv(gym.Env):
         """
         收集并返回环境的观测值。
         """
-        # 将图像数据乘以 255 并转换为 np.uint8 类型，去掉单一的维度，并堆叠起来
-        gt_img_np = (self.ground_truth_image * 255).squeeze(0).byte().numpy().astype(np.uint8)
-        c_flt_img_np = (self.current_floating_image * 255).squeeze(0).byte().numpy().astype(np.uint8)
-
+        # 直接转换为 np.uint8 类型，避免重复缩放
+        gt_img_np = self.ground_truth_image.squeeze(0).cpu().numpy().astype(np.uint8)
+        c_flt_img_np = self.current_floating_image.squeeze(0).cpu().numpy().astype(np.uint8)
         # 堆叠图像以形成 (2, 256, 256) 的数组
         obs = np.stack((gt_img_np, c_flt_img_np), axis=0)
-
         return obs
 
     def _get_info(self):
@@ -313,9 +311,8 @@ class ImgRegEnv(gym.Env):
             ax.axis('off')
 
         mixed_ax = axes[0, 2]  # 选择(0, 2)位置的轴
-        ref_img_np = (self.reference_image * 255).squeeze(0).byte().numpy().astype(np.uint8)
-        cu_flt_img_np = (self.current_floating_image * 255).squeeze(0).byte().numpy().astype(np.uint8)
-
+        ref_img_np = self.reference_image.squeeze(0).cpu().numpy().astype(np.uint8)
+        cu_flt_img_np = self.current_floating_image.squeeze(0).cpu().numpy().astype(np.uint8)
         # 使用alpha混合两个图像
         mixed_image = 0.5 * ref_img_np + 0.5 * cu_flt_img_np
         mixed_ax.imshow(mixed_image.astype(np.uint8), cmap='gray')
