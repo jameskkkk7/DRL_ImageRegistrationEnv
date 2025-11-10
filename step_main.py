@@ -47,7 +47,7 @@ def manual_test():
 gym.register(
     id='img_registration-v0',
     entry_point='env:ImgRegEnv',
-    description='A Simple Image Registration Environment :)',
+    # description='A Simple Image Registration Environment :)',
 )
 
 

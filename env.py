@@ -8,7 +8,7 @@ date:2024/5/11
 IMG_REG_Env.v2
 """
 import sys
-sys.path.append('/home/james/TianshouImgReg/ImgRegEnv')
+# sys.path.append('/home/james/TianshouImgReg/ImgRegEnv')
 import io
 import math
 from collections import deque
@@ -82,11 +82,11 @@ class ImgRegEnv(gym.Env):
             self.datalist = data_list  # 获取存储在cpu内存中的数据样本
         else:
             if env_mode == "Easy":
-                he_folder = '/home/james/TianshouImgReg/ImgRegEnv/Data/Cricle_img'
-                cdx_folder = '/home/james/TianshouImgReg/ImgRegEnv/Data/Cricle_img'
+                he_folder = '/Users/wuboyuan/PycharmProjects/DRL_ImageRegistrationEnv/data/Cricle_img'
+                cdx_folder = '/Users/wuboyuan/PycharmProjects/DRL_ImageRegistrationEnv/data/Cricle_img'
             else:
-                he_folder = '/home/james/TianshouImgReg/ImgRegEnv/Data/HE_image'
-                cdx_folder = '/home/james/TianshouImgReg/ImgRegEnv/Data/CDX_image'
+                he_folder = '/Users/wuboyuan/PycharmProjects/DRL_ImageRegistrationEnv/data/HE_image'
+                cdx_folder = '/Users/wuboyuan/PycharmProjects/DRL_ImageRegistrationEnv/data/CDX_image'
 
             self.datalist = preprocess_all_images(he_folder_path=he_folder, cdx_folder_path=cdx_folder)
             print(f"[Env info]Date Length:{len(self.datalist)}")
@@ -156,6 +156,7 @@ class ImgRegEnv(gym.Env):
         self.current_floating_image = self.floating_image
         self.current_matrix = torch.eye(3)
         self.distance = self.get_distance()  # 获取初始距离
+        self._render_frame()
         observation = self._get_obs()
         info = self._get_info()
         # print(f"[Env info]:Env Reset")
@@ -384,6 +385,8 @@ class ImgRegEnv(gym.Env):
     #     # 打印保存成功的消息
     #     print(f"Compressed GIF saved to {gif_path}")
     def render(self):
+        if self.frame is None:
+            self._render_frame()
         # 调用内部的_render_frame方法来生成帧
         frame_array = self.frame
         # print(frame_array.shape)
