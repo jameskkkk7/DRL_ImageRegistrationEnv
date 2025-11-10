@@ -16,14 +16,14 @@ def time_test(num_episodes: int = 5, max_env_steps: int = 100):
     :param max_env_steps: 每个 episode 最多允许的步数（也会传给环境的 max_step）
     """
 
-    # 用 rgb_array 模式避免 pygame 开窗口的额外系统开销；
-    # 如果你就想测真实人类可见渲染，可以改成 "human"
+    # 注意：render_mode=None 是有意为之，这样可以避免在基准测试时调用 _render_frame() 带来的额外开销，
+    # 专注于纯 env.step 性能。如果你需要测试渲染性能，请将 render_mode 改为 "rgb_array" 或 "human"。
     env = ImgRegEnv(
         parallel=False,
         data_list=None,
         save_path="result",
         max_step=max_env_steps,
-        render_mode="rgb_array",
+        render_mode=None,
         env_mode="Easy",  # 你的数据路径如果用 HE/CDX 那套，就改成 "Hard"
     )
 

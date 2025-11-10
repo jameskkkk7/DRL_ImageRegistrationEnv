@@ -103,24 +103,9 @@ def preprocess_image(img_path, do_sift=False):
     img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
 
     if img.shape[2] == 4:
-        # 分离出BGR和Alpha通道
-        b, g, r, alpha = cv2.split(img)
-
-        # 生成黑色背景的BGR图像
-        b_black = 0 * np.ones_like(b, dtype=np.uint8)
-        g_black = 0 * np.ones_like(g, dtype=np.uint8)
-        r_black = 0 * np.ones_like(r, dtype=np.uint8)
-
-        # 计算新的图像，将透明部分替换为黑色背景
-        b = (b * (alpha / 255.0) + b_black * (1 - alpha / 255.0)).astype(np.uint8)
-        g = (g * (alpha / 255.0) + g_black * (1 - alpha / 255.0)).astype(np.uint8)
-        r = (r * (alpha / 255.0) + r_black * (1 - alpha / 255.0)).astype(np.uint8)
-
-        # 合并BGR三个通道
-        img = cv2.merge([b, g, r])
-    else:
-        # 如果不包含alpha通道，直接使用读取的图像
-        img = img
+        # 直接将 BGRA 转为 BGR，速度更快
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    # 如果不包含alpha通道，直接使用读取的图像
 
     # 将图像转换为3通道，去除alpha通道
     # img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)

@@ -1,8 +1,10 @@
+import cv2 
+# 全局 SIFT 实例，避免在每次调用时重复创建
+_SIFT = cv2.SIFT_create()
 import os
 import random
 import os
 # import imageio
-import cv2
 import numpy as np
 import torch
 
@@ -174,8 +176,7 @@ def get_sift_features(image):
     if image.dtype != np.uint8:
         image = image.astype(np.uint8)
     # print(image.shape, image.dtype)
-    sift = cv2.SIFT_create()
-    key_points = sift.detect(image, None)
+    key_points = _SIFT.detect(image, None)
     if key_points is None:
         print("No SIFT features detected.")
         return None, None
@@ -195,16 +196,33 @@ def transform_key_points(kps, m):
     Returns:
         np.array: Transformed key_points.
     """
-    transformed_kps = np.empty_like(kps)
+    """
+    Apply an affine transformation to keypoints.
+
+    Args:
+        kps (np.array): Array of shape (n, 2) containing key_points.
+        m (np.array): 2x3 or 3x3 affine transformation matrix.
+
+    Returns:
+        np.array: Transformed key_points.
+    """
+    # 保证是 NumPy 类型
+    kps = np.asarray(kps, dtype=np.float32)
+    m = np.asarray(m, dtype=np.float32)
+
+    # 使用逆矩阵，与原逻辑保持一致
     m = np.linalg.inv(m)
     if m.shape[0] == 3:
         m = affine_3x3_to_2x3(m)
-    for i in range(kps.shape[0]):
-        point = kps[i]
-        point = np.hstack((point, [1.0]))
-        transformed_point = m @ point.T
-        transformed_kps[i] = transformed_point
-    return transformed_kps
+
+    # 添加齐次坐标 (x, y, 1)
+    ones = np.ones((kps.shape[0], 1), dtype=np.float32)
+    kps_h = np.hstack([kps, ones])  # (N, 3)
+
+    # 矩阵乘法一次性完成所有点的变换
+    transformed = kps_h @ m.T  # (N, 2)
+
+    return transformed.astype(kps.dtype)
 
 
 def count_distance(points1, points2):

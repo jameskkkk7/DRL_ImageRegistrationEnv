@@ -28,7 +28,7 @@ import math
 class ImgRegEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 25}
 
-    def __init__(self, parallel, data_list, save_path, max_step, render_mode='human', env_mode="Easy"):
+    def __init__(self, parallel, data_list, save_path, max_step, render_mode=None, env_mode="Easy"):
         super(ImgRegEnv, self).__init__()
 
         self.action_space = spaces.Discrete(8)  # 动作空间
@@ -156,7 +156,8 @@ class ImgRegEnv(gym.Env):
         self.current_floating_image = self.floating_image
         self.current_matrix = torch.eye(3)
         self.distance = self.get_distance()  # 获取初始距离
-        self._render_frame()
+        if self.render_mode is not None:
+            self._render_frame()
         observation = self._get_obs()
         info = self._get_info()
         # print(f"[Env info]:Env Reset")
@@ -198,7 +199,8 @@ class ImgRegEnv(gym.Env):
                 distance_0 = self.distance
                 self.distance = self.get_distance()
                 self.round_num += 1
-                self._render_frame()
+                if self.render_mode is not None:
+                    self._render_frame()
                 reward_sign, sign, punish = self.enqueue_action(action)
                 # print(f"penalty:{penalty}")
                 # 计算奖励
@@ -385,6 +387,8 @@ class ImgRegEnv(gym.Env):
     #     # 打印保存成功的消息
     #     print(f"Compressed GIF saved to {gif_path}")
     def render(self):
+        if self.render_mode is None:
+            return None
         if self.frame is None:
             self._render_frame()
         # 调用内部的_render_frame方法来生成帧
