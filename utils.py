@@ -185,6 +185,7 @@ def get_sift_features(image):
     return key_points_np
 
 
+
 def transform_key_points(kps, m):
     """
     Apply an affine transformation to keypoints.
@@ -212,6 +213,35 @@ def transform_key_points(kps, m):
 
     # 使用逆矩阵，与原逻辑保持一致
     m = np.linalg.inv(m)
+    if m.shape[0] == 3:
+        m = affine_3x3_to_2x3(m)
+
+    # 添加齐次坐标 (x, y, 1)
+    ones = np.ones((kps.shape[0], 1), dtype=np.float32)
+    kps_h = np.hstack([kps, ones])  # (N, 3)
+
+    # 矩阵乘法一次性完成所有点的变换
+    transformed = kps_h @ m.T  # (N, 2)
+
+    return transformed.astype(kps.dtype)
+
+
+# New helper: transform_key_points_no_inv
+def transform_key_points_no_inv(kps, m):
+    """
+    Apply an affine transformation to keypoints without inverting the matrix.
+
+    Args:
+        kps (np.array): Array of shape (n, 2) containing key_points.
+        m (np.array or torch.Tensor): 2x3 or 3x3 affine transformation matrix.
+
+    Returns:
+        np.array: Transformed key_points.
+    """
+    kps = np.asarray(kps, dtype=np.float32)
+    m = np.asarray(m, dtype=np.float32)
+
+    # 如果是 3x3，先转成 2x3
     if m.shape[0] == 3:
         m = affine_3x3_to_2x3(m)
 

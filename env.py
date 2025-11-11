@@ -17,7 +17,7 @@ import gymnasium as gym
 import numpy as np
 from PIL import Image
 from gymnasium import spaces
-from utils import transform_key_points, count_distance
+from utils import transform_key_points, transform_key_points_no_inv, count_distance
 from image_preprocess import move, preprocess_all_images
 import matplotlib.pyplot as plt
 import torch
@@ -77,6 +77,8 @@ class ImgRegEnv(gym.Env):
         self.cu_kps = None
 
         self.frame = None
+
+        self.ground_truth_matrix_inv = None
 
         if parallel:
             self.datalist = data_list  # 获取存储在cpu内存中的数据样本
@@ -152,6 +154,7 @@ class ImgRegEnv(gym.Env):
             self.ground_truth_matrix,
             self.gt_kps
          ) = self.dataloader()
+        self.ground_truth_matrix_inv = torch.linalg.inv(self.ground_truth_matrix)
         self.round_num = 0
         self.current_floating_image = self.floating_image
         self.current_matrix = torch.eye(3)
@@ -277,14 +280,18 @@ class ImgRegEnv(gym.Env):
 
     def get_distance(self):
         """
-
         :return: 返回当前环境的奖励
         """
-        # gt_m = torch.linalg.inv(self.ground_truth_matrix)
-        gt_m = self.ground_truth_matrix
+        # 使用缓存的 ground_truth_matrix_inv，避免每一步重复求逆
+        if self.ground_truth_matrix_inv is None:
+            self.ground_truth_matrix_inv = torch.linalg.inv(self.ground_truth_matrix)
 
-        self.kps = transform_key_points(self.gt_kps, gt_m)  # 因为一些奇怪的bug
-        self.cu_kps = transform_key_points(self.kps,  torch.inverse(self.current_matrix))
+        # 将 SIFT 特征从 ground truth 坐标系变换到统一坐标系
+        self.kps = transform_key_points_no_inv(self.gt_kps, self.ground_truth_matrix_inv)
+
+        # 再用当前矩阵把关键点变换到当前浮动图像坐标系
+        self.cu_kps = transform_key_points_no_inv(self.kps, self.current_matrix)
+
         reward = count_distance(self.gt_kps, self.cu_kps)
         reward = math.log(reward + 1)
         return reward
