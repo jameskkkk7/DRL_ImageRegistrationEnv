@@ -375,24 +375,6 @@ class ImgRegEnv(gym.Env):
         # 关闭图形以释放内存
         plt.close(fig)
 
-    # def render(self):
-    #     """
-    #     将self.gif_list中的所有帧渲染成一个GIF，并清空self.gif_list。
-    #     """
-    #     # 获取当前时间戳
-    #     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S%f')
-    #     # 创建一个包含时间戳的文件名
-    #     gif_filename = f'environment_animation_{timestamp}.gif'
-    #     gif_path = os.path.join(self.save_path, gif_filename)
-
-    #     # 使用 imageio 库保存 GIF
-    #     imageio.mimsave(gif_path, self.gif_list, duration=0.1, fps=15, subrectangles=True)
-
-    #     # 清空 gif_list 以便存储新的帧
-    #     self.gif_list.clear()
-
-    #     # 打印保存成功的消息
-    #     print(f"Compressed GIF saved to {gif_path}")
     def render(self):
         if self.render_mode is None:
             return None
@@ -444,58 +426,3 @@ class ImgRegEnv(gym.Env):
 
         # 打印一条消息，确认环境已被关闭
         print(f"[Env info]: Environment closed.")
-
-
-# def test_env():
-#     # 假设你的数据列表已经准备好了，这里用一个空列表作为示例
-#     # he_folder = './Expand_image/rotated_images/HE_image'
-#     # cdx_folder = './Expand_image/rotated_images/_image'
-#     #
-#     # data_list = preprocess_all_images(he_folder_path=he_folder, cdx_folder_path=cdx_folder)
-
-#     # 初始化环境
-#     env = ImgRegEnv(data_list=None, parallel=False, max_step=500, save_path="result", render_mode="human")
-
-#     # 重置环境
-#     env.reset()
-#     # env.render()
-#     # 进行一系列步骤，直到环境结束
-#     terminated = False
-#     step = 0
-#     while not terminated:
-#         # 这里假设action_tenser是一个从神经网络获取的动作张量，为了测试，我们随机生成一个动作
-#         # 在实际应用中，你需要根据你的神经网络模型来生成这个动作
-#         # action = np.random.randint(8)
-#         # 请求用户输入动作
-#         action = int(input("Enter action (0-7): "))
-
-#         # 进行一步
-#         observation, reward, terminated, truncated, info = env.step(action)
-#         env.render()
-#         # print(observation)
-#         # print("Shape:", observation.shape)
-
-#         # 更新步骤计数
-#         step += 1
-
-#         # 打印奖励信息
-#         print(f"Step {step}: Reward = {reward}")
-
-#     # 渲染当前状态
-#     # env.render()
-#     print("Environment has ended.")
-
-
-# # 运行测试函数
-# test_env()
-
-
-
-# # 创建环境实例，这里假设其他参数已经正确设置
-# env = ImgRegEnv(parallel=False, data_list=[], save_path="result", max_step=500, render_mode="human")
-
-# # 测试 enqueue_action 方法
-# print(env.enqueue_action('0'))  # 应该返回0，因为'1'的逆动作'0'不在历史记录中
-# print(env.enqueue_action('2'))  # 应该返回0，因为'2'没有逆动作
-# print(env.enqueue_action('1'))  # 应该返回0，因为'3'的逆动作'2'不在历史记录中
-# print(env.enqueue_action('1'))  # 应该返回1 / math.sqrt(1)，因为'1'的逆动作'0'是上一个动作
