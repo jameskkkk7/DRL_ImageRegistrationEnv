@@ -1,7 +1,27 @@
 import multiprocessing as mp
 import time
+import torch
 
 from env import ImgRegEnv
+
+# ==== Helpers to enforce boundary & simulate Agent-side work ====
+def _assert_cpu_tensor(x, where: str = "obs"):
+    assert isinstance(x, torch.Tensor), f"{where} must be torch.Tensor, got {type(x)}"
+    assert x.device.type == "cpu", f"{where} must be on CPU, got {x.device}"
+    assert x.ndim >= 2, f"{where} should have at least 2 dims, got shape={tuple(getattr(x, 'shape', []))}"
+
+def _agent_postprocess(obs: torch.Tensor, device: str = 'cpu', normalize: bool = False) -> torch.Tensor:
+    """
+    Simulate Agent-side processing ONLY (outside env): optional device move and normalization.
+    This function must not be called inside the environment implementation.
+    """
+    y = obs
+    if device != 'cpu' and torch.cuda.is_available():
+        y = y.to(device, non_blocking=True)
+    if normalize:
+        y = y.float()
+        y = y.div_(255.0)
+    return y
 
 
 # Helper function for multiprocessing parallel benchmark
@@ -15,9 +35,8 @@ def _run_env_benchmark(args):
     Returns:
         (total_steps, total_time) for this worker.
     """
-    env_id, data_list, max_env_steps, num_episodes = args
+    env_id, data_list, max_env_steps, num_episodes, agent_device, do_agent_post = args
 
-    # 每个子进程各自创建一个环境实例，使用 parallel=True 并复用主进程准备好的 data_list
     env = ImgRegEnv(
         parallel=True,
         data_list=data_list,
@@ -28,77 +47,85 @@ def _run_env_benchmark(args):
     )
 
     total_steps = 0
-    total_time = 0.0
+    total_step_time = 0.0  # pure env.step timing
+    total_agent_time = 0.0  # simulated Agent-side time (device move/normalize)
 
     try:
         for ep in range(num_episodes):
             obs, info = env.reset()
+            _assert_cpu_tensor(obs, "reset_obs")
             terminated = False
             truncated = False
             step_in_ep = 0
 
             while not (terminated or truncated) and step_in_ep < max_env_steps:
                 action = env.action_space.sample()
+
                 t0 = time.time()
                 obs, reward, terminated, truncated, info = env.step(action)
                 t1 = time.time()
+                _assert_cpu_tensor(obs, "step_obs")
 
-                total_time += (t1 - t0)
+                total_step_time += (t1 - t0)
+
+                if do_agent_post:
+                    t2 = time.time()
+                    _ = _agent_postprocess(obs, device=agent_device, normalize=False)
+                    t3 = time.time()
+                    total_agent_time += (t3 - t2)
+
                 total_steps += 1
                 step_in_ep += 1
     finally:
         env.close()
 
-    return total_steps, total_time
+    return total_steps, total_step_time, total_agent_time
 
 
-def time_test(num_episodes: int = 5, max_env_steps: int = 100):
+def time_test(num_episodes: int = 5, max_env_steps: int = 100, *, agent_device: str = 'cpu', do_agent_post: bool = False):
     """
     使用随机 agent 测试环境响应时间（单进程单环境基准）。
 
-    每一步的耗时统计区间：
-        t0 = 调用 env.step(action) 之前
-        t1 = 调用 env.render() 之后
-    即一次完整交互 = step + render。
-
-    :param num_episodes: 运行多少个 episode
-    :param max_env_steps: 每个 episode 最多允许的步数（也会传给环境的 max_step）
+    计时口径：
+      - step_time: 仅 env.step(action) 的耗时（严格环境边界内）。
+      - agent_time: 可选，模拟 Agent 侧（跨设备/归一化）的耗时（严格环境边界外）。
     """
-
-    # 注意：render_mode=None 是有意为之，这样可以避免在基准测试时调用 _render_frame() 带来的额外开销，
-    # 专注于纯 env.step 性能。如果你需要测试渲染性能，请将 render_mode 改为 "rgb_array" 或 "human"。
     env = ImgRegEnv(
         parallel=False,
         data_list=None,
         save_path="result",
         max_step=max_env_steps,
         render_mode=None,
-        env_mode="Easy",  # 你的数据路径如果用 HE/CDX 那套，就改成 "Hard"
+        env_mode="Easy",
     )
 
     step_times = []
+    agent_times = []
     total_steps = 0
 
     try:
         for ep in range(num_episodes):
             obs, info = env.reset()
+            _assert_cpu_tensor(obs, "reset_obs")
             terminated = False
             truncated = False
             step_in_ep = 0
 
             while not (terminated or truncated) and step_in_ep < max_env_steps:
-                # 随机 agent：从动作空间中随机采样一个动作
                 action = env.action_space.sample()
 
                 t0 = time.time()
                 obs, reward, terminated, truncated, info = env.step(action)
-
-                # 如果你只想测 step 的耗时，把下面这行注释掉即可
-                # env.render()
-
                 t1 = time.time()
-
+                _assert_cpu_tensor(obs, "step_obs")
                 step_times.append(t1 - t0)
+
+                if do_agent_post:
+                    t2 = time.time()
+                    _ = _agent_postprocess(obs, device=agent_device, normalize=False)
+                    t3 = time.time()
+                    agent_times.append(t3 - t2)
+
                 total_steps += 1
                 step_in_ep += 1
 
@@ -108,12 +135,19 @@ def time_test(num_episodes: int = 5, max_env_steps: int = 100):
         env.close()
 
     if total_steps > 0:
-        avg_time = sum(step_times) / total_steps
+        avg_step = sum(step_times) / total_steps if step_times else 0.0
+        avg_agent = sum(agent_times) / len(agent_times) if agent_times else 0.0
+        avg_total = avg_step + avg_agent
         print("================ Time Test Result ================")
-        print(f"Episodes      : {num_episodes}")
-        print(f"Total steps   : {total_steps}")
-        print(f"Avg step time : {avg_time * 1000:.3f} ms/step")
-        print(f"Throughput    : {1.0 / avg_time:.2f} steps/sec")
+        print(f"Episodes           : {num_episodes}")
+        print(f"Total steps        : {total_steps}")
+        print(f"Avg env.step       : {avg_step * 1000:.3f} ms/step")
+        if do_agent_post:
+            print(f"Avg agent post     : {avg_agent * 1000:.3f} ms/step  (device={agent_device})")
+            print(f"Avg end-to-end     : {avg_total * 1000:.3f} ms/step")
+            print(f"Throughput (E2E)   : {1.0 / avg_total:.2f} steps/sec")
+        else:
+            print(f"Throughput (step)  : {1.0 / avg_step:.2f} steps/sec")
         print("==================================================")
     else:
         print("[TimeTest] No steps were executed. Check environment or parameters.")
@@ -121,17 +155,17 @@ def time_test(num_episodes: int = 5, max_env_steps: int = 100):
 # Parallel benchmark function
 def time_test_parallel(num_envs: int = 4,
                        num_episodes_per_env: int = 5,
-                       max_env_steps: int = 100):
+                       max_env_steps: int = 100,
+                       *,
+                       agent_device: str = 'cpu',
+                       do_agent_post: bool = False):
     """
-    使用多进程并行多个 ImgRegEnv 实例，测试并行采样时的整体吞吐量。
+    使用多进程并行多个 ImgRegEnv 实例，测试在清晰边界下的整体吞吐量。
 
-    :param num_envs: 同时并行的环境数量（也是子进程数）
-    :param num_episodes_per_env: 每个环境各自运行多少个 episode
-    :param max_env_steps: 每个 episode 最多步数（传给环境的 max_step）
+    - 仅统计 env.step（环境边界内）时间；
+    - 可选统计 Agent 侧（环境边界外）的耗时。
     """
-
-    # 先在主进程构造一个环境，用于预处理数据并拿到 datalist，
-    # 避免每个子进程都重复跑 preprocess_all_images。
+    # 先在主进程构造一个环境，用于预处理数据并拿到 datalist，避免每个子进程重复预处理
     loader_env = ImgRegEnv(
         parallel=False,
         data_list=None,
@@ -143,9 +177,8 @@ def time_test_parallel(num_envs: int = 4,
     data_list = loader_env.datalist
     loader_env.close()
 
-    # 为每个子进程准备参数
     args_list = [
-        (env_id, data_list, max_env_steps, num_episodes_per_env)
+        (env_id, data_list, max_env_steps, num_episodes_per_env, agent_device, do_agent_post)
         for env_id in range(num_envs)
     ]
 
@@ -153,24 +186,36 @@ def time_test_parallel(num_envs: int = 4,
         results = pool.map(_run_env_benchmark, args_list)
 
     total_steps = sum(r[0] for r in results)
-    total_time = sum(r[1] for r in results)
+    total_step_time = sum(r[1] for r in results)
+    total_agent_time = sum(r[2] for r in results)
 
-    if total_steps > 0 and total_time > 0.0:
-        avg_time = total_time / total_steps
+    if total_steps > 0 and total_step_time > 0.0:
+        avg_step = total_step_time / total_steps
+        avg_agent = (total_agent_time / total_steps) if do_agent_post and total_agent_time > 0 else 0.0
+        avg_total = avg_step + avg_agent
         print("============ Parallel Time Test Result ============")
-        print(f"Num envs            : {num_envs}")
-        print(f"Episodes/env        : {num_episodes_per_env}")
-        print(f"Total steps (all)   : {total_steps}")
-        print(f"Avg step time (all) : {avg_time * 1000:.3f} ms/step")
-        print(f"Throughput (all)    : {total_steps / total_time:.2f} steps/sec")
+        print(f"Num envs             : {num_envs}")
+        print(f"Episodes/env         : {num_episodes_per_env}")
+        print(f"Total steps (all)    : {total_steps}")
+        print(f"Avg env.step (all)   : {avg_step * 1000:.3f} ms/step")
+        if do_agent_post:
+            print(f"Avg agent post (all) : {avg_agent * 1000:.3f} ms/step  (device={agent_device})")
+            print(f"Avg end-to-end (all) : {avg_total * 1000:.3f} ms/step")
+            print(f"Throughput (E2E all) : {1.0 / avg_total:.2f} steps/sec")
+        else:
+            print(f"Throughput (step)    : {total_steps / total_step_time:.2f} steps/sec")
         print("===================================================")
     else:
         print("[Parallel TimeTest] No steps were executed. Check environment or parameters.")
 
 
 if __name__ == "__main__":
-    # 单进程单环境基准测试
-    time_test(num_episodes=100, max_env_steps=500)
+    # 自动选择 Agent 设备（仅在 Agent 侧使用，环境始终在 CPU 上输出 Tensor）
+    agent_device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    # 多进程并行基准测试（可按需调整或注释）
-    time_test_parallel(num_envs=3, num_episodes_per_env=100, max_env_steps=500)
+    # 单进程单环境基准测试（按需调整 episode/steps）
+    time_test(num_episodes=100, max_env_steps=500, agent_device=agent_device, do_agent_post=True)
+
+    # 多进程并行基准测试
+    time_test_parallel(num_envs=3, num_episodes_per_env=100, max_env_steps=500,
+                       agent_device=agent_device, do_agent_post=True)

@@ -1,6 +1,11 @@
 import gymnasium as gym
 from env import ImgRegEnv  # 确保从正确的模块导入
 import time
+import torch
+
+def _assert_cpu_tensor(x, where: str = "obs"):
+    assert isinstance(x, torch.Tensor), f"{where} must be torch.Tensor, got {type(x)}"
+    assert x.device.type == "cpu", f"{where} must be on CPU, got {x.device}"
 
 def manual_test():
     """手动输入动作测试环境：输入 0-7 执行动作，r 重置，q 退出。"""
@@ -14,6 +19,9 @@ def manual_test():
         env_mode='Easy'
     )
     obs, info = env.reset()
+    _assert_cpu_tensor(obs, "reset_obs")
+    print(f"reset_obs: shape={tuple(obs.shape)}, dtype={obs.dtype}, device={obs.device}")
+    simulate_agent_device = 'cpu'  # 改为 'cuda' 可在交互中模拟 Agent 侧跨设备（若 CUDA 可用）
     print("环境已重置。输入 0-7 选择动作；输入 r 重置；输入 q 退出。")
     step = 0
     try:
@@ -25,6 +33,8 @@ def manual_test():
                 break
             if cmd == 'r':
                 obs, info = env.reset()
+                _assert_cpu_tensor(obs, "reset_obs")
+                print(f"reset_obs: shape={tuple(obs.shape)}, dtype={obs.dtype}, device={obs.device}")
                 step = 0
                 continue
             if not cmd.isdigit() or not (0 <= int(cmd) <= 7):
@@ -32,11 +42,17 @@ def manual_test():
                 continue
             action = int(cmd)
             obs, reward, terminated, truncated, info = env.step(action)
+            _assert_cpu_tensor(obs, "step_obs")
+            # （可选）在交互测试里模拟 Agent 侧跨设备，不影响环境实现
+            if simulate_agent_device != 'cpu' and torch.cuda.is_available():
+              _ = obs.to(simulate_agent_device, non_blocking=True)
             step += 1
             print(f"Step {step}: action={action}, reward={reward:.3f}, distance={info.get('distance'):.4f}")
             if terminated or truncated:
                 print("回合结束，自动重置。")
                 obs, info = env.reset()
+                _assert_cpu_tensor(obs, "reset_obs")
+                print(f"reset_obs: shape={tuple(obs.shape)}, dtype={obs.dtype}, device={obs.device}")
                 step = 0
             # 小憩一下，避免终端刷屏过快
             time.sleep(0.02)
