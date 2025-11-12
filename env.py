@@ -98,13 +98,13 @@ class ImgRegEnv(gym.Env):
 
     def _get_obs(self):
         """
-        收集并返回环境的观测值。
+        收集并返回环境的观测值（CPU Tensor）。
+        形状：(2, 256, 256)，dtype 与内部图像一致（默认 float32）。
         """
-        # 直接转换为 np.uint8 类型，避免重复缩放
-        gt_img_np = self.ground_truth_image.squeeze(0).cpu().numpy().astype(np.uint8)
-        c_flt_img_np = self.current_floating_image.squeeze(0).cpu().numpy().astype(np.uint8)
-        # 堆叠图像以形成 (2, 256, 256) 的数组
-        obs = np.stack((gt_img_np, c_flt_img_np), axis=0)
+        gt_img = self.ground_truth_image.squeeze(0)  # (H, W)
+        cu_img = self.current_floating_image.squeeze(0)  # (H, W)
+        obs = torch.stack((gt_img, cu_img), dim=0)  # (2, H, W)
+        # 保证在 CPU 上（本环境不做跨设备迁移）
         return obs
 
     def _get_info(self):

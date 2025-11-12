@@ -4,6 +4,62 @@ import re
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
+def apply_affine_transform_torch(image, affine_matrix, output_size=(256, 256)):
+    """
+    Apply an affine transformation to an image using pure PyTorch on CPU.
+
+    Args:
+        image (torch.Tensor): shape (1, H, W), dtype float32/uint8, CPU tensor.
+        affine_matrix (torch.Tensor or np.ndarray): 3x3 or 2x3 affine matrix in *pixel* coordinates
+            that maps OUTPUT pixel coordinates to INPUT pixel coordinates (CV2-style).
+        output_size (tuple): (H, W) of the output image.
+
+    Returns:
+        torch.Tensor: Transformed image tensor with shape (1, H, W) and same dtype as input image.
+    """
+    if isinstance(affine_matrix, np.ndarray):
+        affine_matrix = torch.from_numpy(affine_matrix)
+    affine_matrix = affine_matrix.to(dtype=torch.float32, device='cpu')
+    if affine_matrix.shape[0] == 2:
+        # make it 3x3
+        affine_matrix = torch.vstack([affine_matrix, torch.tensor([0.0, 0.0, 1.0])])
+
+    # Input image: ensure float for resampling, remember original dtype
+    orig_dtype = image.dtype
+    img = image.to(dtype=torch.float32, device='cpu')  # (1, H, W)
+    H, W = output_size
+    inH, inW = img.shape[-2], img.shape[-1]
+
+    # Build K matrices for normalized <-> pixel coords with align_corners=True
+    def build_K(h, w):
+        sx = (w - 1) / 2.0
+        sy = (h - 1) / 2.0
+        K = torch.tensor([[sx, 0.0, sx],
+                          [0.0, sy, sy],
+                          [0.0, 0.0, 1.0]], dtype=torch.float32)
+        Kinv = torch.tensor([[2.0 / (w - 1), 0.0, -1.0],
+                             [0.0, 2.0 / (h - 1), -1.0],
+                             [0.0, 0.0, 1.0]], dtype=torch.float32)
+        return K, Kinv
+
+    K_out, _ = build_K(H, W)
+    _, Kinv_in = build_K(inH, inW)
+
+    # theta maps OUTPUT normalized coords -> INPUT normalized coords
+    theta_3x3 = Kinv_in @ affine_matrix @ K_out
+    theta = theta_3x3[:2, :].unsqueeze(0)  # (1, 2, 3)
+
+    # Prepare tensors for grid_sample
+    img_bchw = img.unsqueeze(0)  # (1, 1, inH, inW)
+    grid = torch.nn.functional.affine_grid(theta, size=(1, 1, H, W), align_corners=True)
+    out = torch.nn.functional.grid_sample(img_bchw, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
+    out = out.squeeze(0)  # (1, H, W)
+
+    # Cast back to original dtype if needed
+    if orig_dtype in (torch.uint8, torch.int16, torch.int32, torch.int64):
+        out = out.clamp(0.0, 255.0).round().to(dtype=torch.uint8)
+    return out
 from utils import affine_3x3_to_2x3, affine_2x3_to_3x3, get_sift_features, tensor2numpy, numpy2tensor
 
 
@@ -334,6 +390,6 @@ def move(action_index, image, matrix, action_mats=None):
     move_matrix = torch.matmul(affine_matrix, initial_matrix)
 
     # 应用仿射变换到图像上
-    move_image = apply_affine_transform_cv2(image, move_matrix)
+    move_image = apply_affine_transform_torch(image, move_matrix)
 
     return move_image, move_matrix
