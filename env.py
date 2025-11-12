@@ -18,7 +18,7 @@ import numpy as np
 from PIL import Image
 from gymnasium import spaces
 from utils import transform_key_points, transform_key_points_no_inv, count_distance
-from image_preprocess import move, preprocess_all_images
+from image_preprocess import move, preprocess_all_images, generate_affine_matrix_fixed
 import matplotlib.pyplot as plt
 import torch
 import pygame
@@ -38,6 +38,8 @@ class ImgRegEnv(gym.Env):
         self.clock = None
 
         self.rever_actions = {0: 1, 1: 0, 2: 3, 3: 2, 4: 5, 5: 4, 6: 7, 7: 6}  # 逆动作字典
+        # Precompute 8 action affine matrices (CPU) to avoid per-step construction cost
+        self.action_mats = [generate_affine_matrix_fixed(i, device='cpu') for i in range(8)]
 
         self.history = []  # 添加一个属性来存储动作历史
         self.reward_history = []  # 添加一个属性来存储动作历史对应的奖励
@@ -75,6 +77,7 @@ class ImgRegEnv(gym.Env):
         self.kps = None
         self.gt_kps = None
         self.cu_kps = None
+        self.kps_h = None  # homogeneous coords of self.kps, cached per episode
 
         self.frame = None
 
@@ -155,6 +158,12 @@ class ImgRegEnv(gym.Env):
             self.gt_kps
          ) = self.dataloader()
         self.ground_truth_matrix_inv = torch.linalg.inv(self.ground_truth_matrix)
+        # Precompute once per episode: transform gt_kps by GT inverse and cache homogeneous coordinates
+        self.kps = transform_key_points_no_inv(self.gt_kps, self.ground_truth_matrix_inv)
+        self.kps_h = np.hstack([
+            self.kps.astype(np.float32),
+            np.ones((self.kps.shape[0], 1), dtype=np.float32)
+        ])
         self.round_num = 0
         self.current_floating_image = self.floating_image
         self.current_matrix = torch.eye(3)
@@ -197,7 +206,8 @@ class ImgRegEnv(gym.Env):
                 ) = move(
                     action_index=action,
                     image=self.floating_image,
-                    matrix=self.current_matrix
+                    matrix=self.current_matrix,
+                    action_mats=self.action_mats
                 )
                 distance_0 = self.distance
                 self.distance = self.get_distance()
@@ -280,21 +290,21 @@ class ImgRegEnv(gym.Env):
 
     def get_distance(self):
         """
-        :return: 返回当前环境的奖励
+        :return: 返回当前环境的距离度量(对数缩放)
         """
-        # 使用缓存的 ground_truth_matrix_inv，避免每一步重复求逆
-        if self.ground_truth_matrix_inv is None:
-            self.ground_truth_matrix_inv = torch.linalg.inv(self.ground_truth_matrix)
+        # current_matrix -> numpy 2x3 (cheap conversion; 9 numbers)
+        if isinstance(self.current_matrix, torch.Tensor):
+            m = self.current_matrix.detach().cpu().numpy().astype(np.float32, copy=False)
+        else:
+            m = np.asarray(self.current_matrix, dtype=np.float32)
+        m2x3 = m[:2, :]
 
-        # 将 SIFT 特征从 ground truth 坐标系变换到统一坐标系
-        self.kps = transform_key_points_no_inv(self.gt_kps, self.ground_truth_matrix_inv)
+        # Apply affine to cached homogeneous keypoints (N x 3) -> (N x 2)
+        self.cu_kps = self.kps_h @ m2x3.T
 
-        # 再用当前矩阵把关键点变换到当前浮动图像坐标系
-        self.cu_kps = transform_key_points_no_inv(self.kps, self.current_matrix)
-
-        reward = count_distance(self.gt_kps, self.cu_kps)
-        reward = math.log(reward + 1)
-        return reward
+        # Compute distance and log-scale it
+        dist = count_distance(self.gt_kps, self.cu_kps)
+        return math.log(dist + 1.0)
 
     def _render_frame(self):
         """

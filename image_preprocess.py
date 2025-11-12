@@ -315,7 +315,7 @@ def apply_affine_transform_cv2(image, affine_matrix):
     return transformed_image
 
 
-def move(action_index, image, matrix):
+def move(action_index, image, matrix, action_mats=None):
     """
     该函数接受变换对应的编码和图像，返回变换后的图像
     :param action_index: 代表动作的编码
@@ -327,7 +327,10 @@ def move(action_index, image, matrix):
     # 确保图像和矩阵都在正确的设备上
     image = image
     initial_matrix = matrix
-    affine_matrix = generate_affine_matrix_fixed(action_index)
+    if action_mats is None:
+        affine_matrix = generate_affine_matrix_fixed(action_index)
+    else:
+        affine_matrix = action_mats[action_index]
     move_matrix = torch.matmul(affine_matrix, initial_matrix)
 
     # 应用仿射变换到图像上
