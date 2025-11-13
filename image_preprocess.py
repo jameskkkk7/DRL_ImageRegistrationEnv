@@ -390,6 +390,6 @@ def move(action_index, image, matrix, action_mats=None):
     move_matrix = torch.matmul(affine_matrix, initial_matrix)
 
     # 应用仿射变换到图像上
-    move_image = apply_affine_transform_torch(image, move_matrix)
+    move_image = apply_affine_transform_cv2(image, move_matrix)
 
     return move_image, move_matrix

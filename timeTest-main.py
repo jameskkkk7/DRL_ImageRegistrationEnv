@@ -216,8 +216,8 @@ if __name__ == "__main__":
 
 
     # 单进程单环境基准测试（按需调整 episode/steps）
-    time_test(num_episodes=100, max_env_steps=500, agent_device=agent_device, do_agent_post=False)
+    time_test(num_episodes=100, max_env_steps=500, agent_device=agent_device, do_agent_post=True)
 
     # 多进程并行基准测试
     time_test_parallel(num_envs=3, num_episodes_per_env=100, max_env_steps=500,
-                       agent_device=agent_device, do_agent_post=False)
+                       agent_device=agent_device, do_agent_post=True)
