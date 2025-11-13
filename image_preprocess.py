@@ -195,7 +195,7 @@ def generate_random_affine_matrix(scale_variation=0.2, rotation_variation=30, tr
     return affine_matrix
 
 
-def preprocess_all_images(he_folder_path, cdx_folder_path, target_size=(256, 256)):
+def preprocess_all_images(he_folder_path, cdx_folder_path, target_size=(256, 256), rand_cfg=None):
     """
     :param cdx_folder_path: cdx图像的路径
     :param he_folder_path: he图像的路径
@@ -220,7 +220,7 @@ def preprocess_all_images(he_folder_path, cdx_folder_path, target_size=(256, 256
             img1 = preprocess_image(os.path.join(he_folder_path, img1_path))
             img2, kps = preprocess_image(os.path.join(cdx_folder_path, img2_path), do_sift=True)
             # 变换
-            matrix = generate_random_affine_matrix()
+            matrix = generate_random_affine_matrix(**(rand_cfg or {}))
             img2_transformed = apply_affine_transform(img2, matrix)
 
             # resize到同一个大小

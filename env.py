@@ -17,8 +17,8 @@ import gymnasium as gym
 import numpy as np
 from PIL import Image
 from gymnasium import spaces
-from utils import transform_key_points, transform_key_points_no_inv, count_distance
-from image_preprocess import move, preprocess_all_images, generate_affine_matrix_fixed
+from utils import transform_key_points, transform_key_points_no_inv, count_distance, affine_2x3_to_3x3
+from image_preprocess import move, preprocess_all_images, generate_affine_matrix_fixed, generate_random_affine_matrix, apply_affine_transform_cv2
 import matplotlib.pyplot as plt
 import torch
 import pygame
@@ -28,7 +28,7 @@ import math
 class ImgRegEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 25}
 
-    def __init__(self, parallel, data_list, save_path, max_step, render_mode=None, env_mode="Easy"):
+    def __init__(self, parallel, data_list, save_path, max_step, render_mode=None, env_mode="Easy", rand_cfg=None, re_randomize_each_reset=False):
         super(ImgRegEnv, self).__init__()
 
         self.action_space = spaces.Discrete(8)  # 动作空间
@@ -63,6 +63,10 @@ class ImgRegEnv(gym.Env):
         self.save_path = save_path
         self.device = "cpu"  # 用于确定当前环境所处的设备
 
+        # 随机扰动配置（可热更新）与 reset 重随机开关
+        self.rand_cfg = rand_cfg or {"scale_variation": 0.2, "rotation_variation": 30, "translation_variation": 60}
+        self.re_randomize_each_reset = re_randomize_each_reset
+
         self.reference_image = torch.zeros(1, 256, 256)  # 基准图像
         self.floating_image = torch.zeros(1, 256, 256)  # 浮动图像
         self.ground_truth_image = torch.zeros(1, 256, 256)  # 地标图像
@@ -92,9 +96,47 @@ class ImgRegEnv(gym.Env):
             else:
                 he_folder = '/Users/wuboyuan/PycharmProjects/DRL_ImageRegistrationEnv/data/HE_image'
                 cdx_folder = '/Users/wuboyuan/PycharmProjects/DRL_ImageRegistrationEnv/data/CDX_image'
-
-            self.datalist = preprocess_all_images(he_folder_path=he_folder, cdx_folder_path=cdx_folder)
+            self.datalist = preprocess_all_images(he_folder_path=he_folder, cdx_folder_path=cdx_folder, rand_cfg=self.rand_cfg)
             print(f"[Env info]Date Length:{len(self.datalist)}")
+
+    def set_rand_cfg(self, **kwargs):
+        """热更新随机扰动范围。在训练过程中可随时调用。
+        支持的键：scale_variation（比例），rotation_variation（度），translation_variation（像素）。
+        仅更新传入的键；其余保持不变。
+        """
+        allowed = {"scale_variation", "rotation_variation", "translation_variation"}
+        for k, v in kwargs.items():
+            if k in allowed:
+                self.rand_cfg[k] = float(v)
+
+    def set_re_randomize_each_reset(self, flag: bool):
+        """设置是否在每次 reset() 时根据 rand_cfg 重新随机初始扰动。"""
+        self.re_randomize_each_reset = bool(flag)
+
+    def re_randomize_now(self):
+        """立即按当前 rand_cfg 生成新的初始扰动（热更新即时生效）。"""
+        # 生成新的随机仿射 A（GT -> 新浮动）
+        A_2x3 = generate_random_affine_matrix(**(self.rand_cfg or {}))
+        A_3x3 = affine_2x3_to_3x3(A_2x3)
+        self._report_perturbation_from_A(A_3x3, prefix='[re_randomize_now]')
+        A_inv_3x3 = np.linalg.inv(A_3x3).astype(np.float32)  # (新浮动 -> GT)
+
+        # 更新 GT 矩阵与逆
+        self.ground_truth_matrix = torch.from_numpy(A_inv_3x3).float()
+        self.ground_truth_matrix_inv = torch.from_numpy(A_3x3).float()
+
+        # 用新的 A 在当前 GT 图像上生成新的浮动图
+        self.floating_image = apply_affine_transform_cv2(self.ground_truth_image, A_2x3)
+
+        # 刷新缓存与状态
+        self.kps = transform_key_points_no_inv(self.gt_kps, self.ground_truth_matrix_inv)
+        self.kps_h = np.hstack([
+            self.kps.astype(np.float32),
+            np.ones((self.kps.shape[0], 1), dtype=np.float32)
+        ])
+        self.current_floating_image = self.floating_image
+        self.current_matrix = torch.eye(3)
+        self.distance = self.get_distance()
 
     def _get_obs(self):
         """
@@ -135,6 +177,16 @@ class ImgRegEnv(gym.Env):
         reference_img, floating_img, ground_truth_img, ground_truth_matrix, kps = data
         return reference_img, floating_img, ground_truth_img, ground_truth_matrix, kps
 
+    def _report_perturbation_from_A(self, A_3x3, prefix=""):
+        """打印由 3x3 仿射矩阵推导出的扰动幅度（缩放、旋转、平移）。"""
+        a, b, tx = float(A_3x3[0, 0]), float(A_3x3[0, 1]), float(A_3x3[0, 2])
+        c, d, ty = float(A_3x3[1, 0]), float(A_3x3[1, 1]), float(A_3x3[1, 2])
+        # 统一尺度（假设各向同性缩放）：s = sqrt(a^2 + c^2)
+        s = math.sqrt(a * a + c * c)
+        # 旋转角（度）：theta = atan2(c, a)
+        rot_deg = math.degrees(math.atan2(c, a))
+        print(f"[Env info]{prefix} rand_cfg={self.rand_cfg} | sampled => scale≈{s:.4f}, rot≈{rot_deg:.2f}°, tx={tx:.2f}, ty={ty:.2f}")
+
     def reset(self, seed=None, options=None):
         """
         用于初始化环境，开始下一局游戏
@@ -158,6 +210,15 @@ class ImgRegEnv(gym.Env):
             self.gt_kps
          ) = self.dataloader()
         self.ground_truth_matrix_inv = torch.linalg.inv(self.ground_truth_matrix)
+        # 可选：每次 reset 时根据 rand_cfg 重新随机初始扰动
+        if self.re_randomize_each_reset:
+            A_2x3 = generate_random_affine_matrix(**(self.rand_cfg or {}))
+            A_3x3 = affine_2x3_to_3x3(A_2x3)
+            self._report_perturbation_from_A(A_3x3, prefix='[reset]')
+            A_inv_3x3 = np.linalg.inv(A_3x3).astype(np.float32)
+            self.ground_truth_matrix = torch.from_numpy(A_inv_3x3).float()
+            self.ground_truth_matrix_inv = torch.from_numpy(A_3x3).float()
+            self.floating_image = apply_affine_transform_cv2(self.ground_truth_image, A_2x3)
         # Precompute once per episode: transform gt_kps by GT inverse and cache homogeneous coordinates
         self.kps = transform_key_points_no_inv(self.gt_kps, self.ground_truth_matrix_inv)
         self.kps_h = np.hstack([

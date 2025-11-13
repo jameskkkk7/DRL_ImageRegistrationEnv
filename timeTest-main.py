@@ -23,6 +23,22 @@ def _agent_postprocess(obs: torch.Tensor, device: str = 'cpu', normalize: bool =
         y = y.div_(255.0)
     return y
 
+def _apply_episode_rand_cfg(env: ImgRegEnv, ep_idx: int, num_eps: int, schedule_spec: dict | None):
+    """在每个 episode 开始前，根据 schedule_spec 动态调整 rand_cfg，并打开每次 reset 重采样。"""
+    if not schedule_spec:
+        return
+    start = schedule_spec.get("start", {})
+    end = schedule_spec.get("end", {})
+    keys = set(start.keys()) | set(end.keys())
+    t = (ep_idx / max(1, num_eps - 1)) if num_eps else 0.0
+    cfg = {}
+    for k in keys:
+        s = float(start.get(k, end.get(k, 0.0)))
+        e = float(end.get(k, s))
+        cfg[k] = s + (e - s) * t  # 线性插值
+    env.set_rand_cfg(**cfg)
+    env.set_re_randomize_each_reset(True)
+
 
 # Helper function for multiprocessing parallel benchmark
 def _run_env_benchmark(args):
@@ -35,7 +51,7 @@ def _run_env_benchmark(args):
     Returns:
         (total_steps, total_time) for this worker.
     """
-    env_id, data_list, max_env_steps, num_episodes, agent_device, do_agent_post = args
+    env_id, data_list, max_env_steps, num_episodes, agent_device, do_agent_post, schedule_spec = args
 
     env = ImgRegEnv(
         parallel=True,
@@ -44,6 +60,7 @@ def _run_env_benchmark(args):
         max_step=max_env_steps,
         render_mode=None,
         env_mode="Easy",
+        re_randomize_each_reset=True,
     )
 
     total_steps = 0
@@ -52,6 +69,7 @@ def _run_env_benchmark(args):
 
     try:
         for ep in range(num_episodes):
+            _apply_episode_rand_cfg(env, ep, num_episodes, schedule_spec)
             obs, info = env.reset()
             _assert_cpu_tensor(obs, "reset_obs")
             terminated = False
@@ -82,7 +100,7 @@ def _run_env_benchmark(args):
     return total_steps, total_step_time, total_agent_time
 
 
-def time_test(num_episodes: int = 5, max_env_steps: int = 100, *, agent_device: str = 'cpu', do_agent_post: bool = False):
+def time_test(num_episodes: int = 5, max_env_steps: int = 100, *, agent_device: str = 'cpu', do_agent_post: bool = False, schedule_spec: dict | None = None):
     """
     使用随机 agent 测试环境响应时间（单进程单环境基准）。
 
@@ -97,6 +115,7 @@ def time_test(num_episodes: int = 5, max_env_steps: int = 100, *, agent_device: 
         max_step=max_env_steps,
         render_mode=None,
         env_mode="Easy",
+        re_randomize_each_reset=True,
     )
 
     step_times = []
@@ -105,6 +124,7 @@ def time_test(num_episodes: int = 5, max_env_steps: int = 100, *, agent_device: 
 
     try:
         for ep in range(num_episodes):
+            _apply_episode_rand_cfg(env, ep, num_episodes, schedule_spec)
             obs, info = env.reset()
             _assert_cpu_tensor(obs, "reset_obs")
             terminated = False
@@ -158,7 +178,8 @@ def time_test_parallel(num_envs: int = 4,
                        max_env_steps: int = 100,
                        *,
                        agent_device: str = 'cpu',
-                       do_agent_post: bool = False):
+                       do_agent_post: bool = False,
+                       schedule_spec: dict | None = None):
     """
     使用多进程并行多个 ImgRegEnv 实例，测试在清晰边界下的整体吞吐量。
 
@@ -178,7 +199,7 @@ def time_test_parallel(num_envs: int = 4,
     loader_env.close()
 
     args_list = [
-        (env_id, data_list, max_env_steps, num_episodes_per_env, agent_device, do_agent_post)
+        (env_id, data_list, max_env_steps, num_episodes_per_env, agent_device, do_agent_post, schedule_spec)
         for env_id in range(num_envs)
     ]
 
@@ -214,10 +235,15 @@ if __name__ == "__main__":
     # agent_device = 'cuda' if torch.cuda.is_available() else 'cpu'
     agent_device = 'cpu'
 
+    schedule_spec = {
+        # 线性课程学习：从较小扰动逐步增加到较大扰动（按 episode 插值）
+        "start": {"scale_variation": 0.05, "rotation_variation": 5,  "translation_variation": 8},
+        "end"  : {"scale_variation": 0.20, "rotation_variation": 30, "translation_variation": 60},
+    }
 
     # 单进程单环境基准测试（按需调整 episode/steps）
-    time_test(num_episodes=100, max_env_steps=500, agent_device=agent_device, do_agent_post=True)
+    time_test(num_episodes=100, max_env_steps=500, agent_device=agent_device, do_agent_post=True, schedule_spec=schedule_spec)
 
     # 多进程并行基准测试
     time_test_parallel(num_envs=3, num_episodes_per_env=100, max_env_steps=500,
-                       agent_device=agent_device, do_agent_post=True)
+                       agent_device=agent_device, do_agent_post=True, schedule_spec=schedule_spec)
