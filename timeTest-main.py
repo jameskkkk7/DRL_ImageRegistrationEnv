@@ -211,11 +211,13 @@ def time_test_parallel(num_envs: int = 4,
 
 if __name__ == "__main__":
     # 自动选择 Agent 设备（仅在 Agent 侧使用，环境始终在 CPU 上输出 Tensor）
-    agent_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # agent_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    agent_device = 'cpu'
+
 
     # 单进程单环境基准测试（按需调整 episode/steps）
-    time_test(num_episodes=100, max_env_steps=500, agent_device=agent_device, do_agent_post=True)
+    time_test(num_episodes=100, max_env_steps=500, agent_device=agent_device, do_agent_post=False)
 
     # 多进程并行基准测试
     time_test_parallel(num_envs=3, num_episodes_per_env=100, max_env_steps=500,
-                       agent_device=agent_device, do_agent_post=True)
+                       agent_device=agent_device, do_agent_post=False)
