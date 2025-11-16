@@ -1,3 +1,6 @@
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
 import multiprocessing as mp
 import time
 import torch
@@ -51,6 +54,8 @@ def _run_env_benchmark(args):
     Returns:
         (total_steps, total_time) for this worker.
     """
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
     env_id, data_list, max_env_steps, num_episodes, agent_device, do_agent_post, schedule_spec = args
 
     env = ImgRegEnv(
@@ -245,5 +250,5 @@ if __name__ == "__main__":
     time_test(num_episodes=100, max_env_steps=500, agent_device=agent_device, do_agent_post=True, schedule_spec=schedule_spec)
 
     # 多进程并行基准测试
-    time_test_parallel(num_envs=3, num_episodes_per_env=100, max_env_steps=500,
+    time_test_parallel(num_envs=40, num_episodes_per_env=1000, max_env_steps=500,
                        agent_device=agent_device, do_agent_post=True, schedule_spec=schedule_spec)

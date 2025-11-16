@@ -91,11 +91,11 @@ class ImgRegEnv(gym.Env):
             self.datalist = data_list  # 获取存储在cpu内存中的数据样本
         else:
             if env_mode == "Easy":
-                he_folder = '/Users/wuboyuan/PycharmProjects/DRL_ImageRegistrationEnv/data/Cricle_img'
-                cdx_folder = '/Users/wuboyuan/PycharmProjects/DRL_ImageRegistrationEnv/data/Cricle_img'
+                he_folder = '/home/james/DRL_ImageRegistrationEnv/Data/Cricle_img'
+                cdx_folder = '/home/james/DRL_ImageRegistrationEnv/Data/Cricle_img'
             else:
-                he_folder = '/Users/wuboyuan/PycharmProjects/DRL_ImageRegistrationEnv/data/HE_image'
-                cdx_folder = '/Users/wuboyuan/PycharmProjects/DRL_ImageRegistrationEnv/data/CDX_image'
+                he_folder = '/home/james/DRL_ImageRegistrationEnv/Data/HE_image'
+                cdx_folder = '/home/james/DRL_ImageRegistrationEnv/Data/CDX_image'
             self.datalist = preprocess_all_images(he_folder_path=he_folder, cdx_folder_path=cdx_folder, rand_cfg=self.rand_cfg)
             print(f"[Env info]Date Length:{len(self.datalist)}")
 
