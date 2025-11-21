@@ -23,6 +23,8 @@ import matplotlib.pyplot as plt
 import torch
 import pygame
 import math
+import requests
+import time
 
 
 class ImgRegEnv(gym.Env):
@@ -63,6 +65,18 @@ class ImgRegEnv(gym.Env):
         self.save_path = save_path
         self.device = "cpu"  # 用于确定当前环境所处的设备
 
+        # -------- 合成数据 API 设置（写死在类内部） --------
+        self.synth_api_url = "http://192.168.31.155:8000/generate"  # Flask SANA 服务
+        self.synth_prob = 0.9                 # 每次 reset 走合成数据的概率
+        self.synth_retry_wait = 5            # 429 时等待秒数
+        self.synth_max_retries = 5           # 最大重试次数
+        self.synth_prompts = [
+            "Congo red stain of amyloid deposition, 20x. Salmon-pink extracellular deposits in vessel walls and stroma, realistic microscopy lighting.",
+            "H&E histopathology of colon adenocarcinoma, 40x. Irregular infiltrative glands, dirty necrosis, stromal desmoplasia, clinical photomicrograph.",
+            "PAS stain histopathology of kidney glomerulus, 40x. Bright magenta thickened basement membranes, sharp counterstain, minimal background."
+        ]
+        # ---------------------------------------------
+
         # 随机扰动配置（可热更新）与 reset 重随机开关
         self.rand_cfg = rand_cfg or {"scale_variation": 0.2, "rotation_variation": 30, "translation_variation": 60}
         self.re_randomize_each_reset = re_randomize_each_reset
@@ -91,11 +105,11 @@ class ImgRegEnv(gym.Env):
             self.datalist = data_list  # 获取存储在cpu内存中的数据样本
         else:
             if env_mode == "Easy":
-                he_folder = '/home/james/DRL_ImageRegistrationEnv/Data/Cricle_img'
-                cdx_folder = '/home/james/DRL_ImageRegistrationEnv/Data/Cricle_img'
+                he_folder = '/Users/wuboyuan/PycharmProjects/DRL_ImageRegistrationEnv/data/Cricle_img'
+                cdx_folder = '/Users/wuboyuan/PycharmProjects/DRL_ImageRegistrationEnv/data/Cricle_img'
             else:
-                he_folder = '/home/james/DRL_ImageRegistrationEnv/Data/HE_image'
-                cdx_folder = '/home/james/DRL_ImageRegistrationEnv/Data/CDX_image'
+                he_folder = '/Users/wuboyuan/PycharmProjects/DRL_ImageRegistrationEnv/data/HE_image'
+                cdx_folder = '/Users/wuboyuan/PycharmProjects/DRL_ImageRegistrationEnv/data/CDX_image'
             self.datalist = preprocess_all_images(he_folder_path=he_folder, cdx_folder_path=cdx_folder, rand_cfg=self.rand_cfg)
             print(f"[Env info]Date Length:{len(self.datalist)}")
 
@@ -138,16 +152,77 @@ class ImgRegEnv(gym.Env):
         self.current_matrix = torch.eye(3)
         self.distance = self.get_distance()
 
+    def _ensure_tensor_obs(self, obs):
+        """Gym 返回的 obs 有时是 numpy.ndarray；这里统一转成 torch.Tensor。"""
+        if isinstance(obs, np.ndarray):
+            # 保持在 CPU；类型沿用 numpy 的 dtype（通常 float32）
+            return torch.from_numpy(obs)
+        return obs
+
     def _get_obs(self):
         """
-        收集并返回环境的观测值（CPU Tensor）。
-        形状：(2, 256, 256)，dtype 与内部图像一致（默认 float32）。
+        打包 observation：
+        obs[0] -> ref_img
+        obs[1] -> c_flt_img
+        obs[2] -> 承载 [ref_kps, flo_kps] 的平面
         """
-        gt_img = self.ground_truth_image.squeeze(0)  # (H, W)
-        cu_img = self.current_floating_image.squeeze(0)  # (H, W)
-        obs = torch.stack((gt_img, cu_img), dim=0)  # (2, H, W)
-        # 保证在 CPU 上（本环境不做跨设备迁移）
+        # 1. 图像：2D (H, W)
+        ref_img_np = self.reference_image.squeeze(0).byte().cpu().numpy().astype(np.uint8)
+        c_flt_img_np = self.current_floating_image.squeeze(0).byte().cpu().numpy().astype(np.uint8)
+
+        # 2. 关键点：做截断 + 补齐，保证 (50, 2)
+        def normalize_kps(kps, target_n=50):
+            if kps is None:
+                # 没有的话直接全 0
+                return np.zeros((target_n, 2), dtype=np.float32)
+            kps = np.asarray(kps, dtype=np.float32)
+
+            # 保守一点：如果维度不对，尝试 reshape 或直接丢弃到 0
+            if kps.ndim != 2:
+                kps = kps.reshape(-1, 2)
+            if kps.shape[1] != 2:
+                # 列数不对直接全 0，避免莫名其妙炸掉
+                return np.zeros((target_n, 2), dtype=np.float32)
+
+            n = kps.shape[0]
+            if n >= target_n:
+                return kps[:target_n]
+            else:
+                pad = np.zeros((target_n - n, 2), dtype=np.float32)
+                return np.concatenate([kps, pad], axis=0)
+
+        # ref_kps: 参考图像关键点（GT）
+        # flo_kps: 当前浮动图像关键点（当前矩阵变换后的）
+        ref_kps = normalize_kps(self.gt_kps, target_n=50)   # (50, 2)
+        flo_kps = normalize_kps(self.cu_kps, target_n=50)   # (50, 2)
+
+        # 这里你原来的 debug 可以保留 / 注释掉
+        # print("gt_kps raw shape:", getattr(self.gt_kps, "shape", None))
+        # print("cu_kps raw shape:", getattr(self.cu_kps, "shape", None))
+        # print("ref_kps norm shape:", ref_kps.shape)
+        # print("flo_kps norm shape:", flo_kps.shape)
+
+        assert ref_kps.shape == (50, 2)
+        assert flo_kps.shape == (50, 2)
+
+        # 3. 打平成一个向量：[ref_kps, flo_kps]  -> (200,)
+        kps_vec = np.concatenate(
+            [ref_kps.reshape(-1), flo_kps.reshape(-1)],
+            axis=0
+        )  # 长度 200
+
+        # 4. 准备一个和图像同样大小的平面来存 kps_vec
+        kps_plane = np.zeros_like(ref_img_np, dtype=np.float32).flatten()
+        assert kps_vec.size <= kps_plane.size, \
+            f"kps 向量长度 {kps_vec.size} 超过了平面容量 {kps_plane.size}"
+
+        kps_plane[:kps_vec.size] = kps_vec
+        kps_plane = kps_plane.reshape(ref_img_np.shape)
+
+        # 5. 最后 stack 成 (3, H, W)，和你的 unpack_observation 对齐
+        obs = np.stack([ref_img_np, c_flt_img_np, kps_plane], axis=0).astype(np.float32)
         return obs
+
 
     def _get_info(self):
         """
@@ -168,7 +243,7 @@ class ImgRegEnv(gym.Env):
         :return:环境需要的数据
         """
         # 下面这部分代码要写在主函数里面，这样才能加载数据到内存中
-        # root_folder='Expand_image/rotated_images'
+        # root_folder='Expand_image/rotated_images'å
         # txt_file = 'Expand_image/new_affine_matrices.txt'
         # preprocess_all_images(root_folder=root_folder, txt_file_path=txt_file, target_size=(256, 256))
         random_int = random.randint(0, len(self.datalist) - 1)
@@ -209,6 +284,47 @@ class ImgRegEnv(gym.Env):
             self.ground_truth_matrix,
             self.gt_kps
          ) = self.dataloader()
+
+        # --------- 概率性使用合成数据（API 生成） ---------
+        if random.random() < self.synth_prob:
+            for attempt in range(self.synth_max_retries):
+                try:
+                    prompt = random.choice(self.synth_prompts)
+                    payload = {
+                        "prompt": prompt,
+                        "num_images": 1,
+                        "height": 256,
+                        "width": 256,
+                        "guidance_scale": 4.5,
+                        "num_inference_steps": 20,
+                    }
+                    resp = requests.post(self.synth_api_url, json=payload, timeout=180)
+
+                    if resp.status_code == 429:
+                        print(f"[Env warn] SANA busy (429). sleep {self.synth_retry_wait}s then retry... ({attempt+1}/{self.synth_max_retries})")
+                        time.sleep(self.synth_retry_wait)
+                        continue
+
+                    resp.raise_for_status()
+
+                    # API 单图返回 image/png；按 256x256 灰度读入
+                    pil_img = Image.open(io.BytesIO(resp.content)).convert("L")
+                    if pil_img.size != (256, 256):
+                        pil_img = pil_img.resize((256, 256), Image.BILINEAR)
+
+                    synth_np = np.array(pil_img, dtype=np.uint8)
+                    synth_t = torch.from_numpy(synth_np).unsqueeze(0)  # (1,256,256)
+
+                    # 用合成图替换 floating_image；其余 GT/kps 仍沿用本地数据
+                    # 这样实现“真实+合成”混合训练，同时不破坏奖励/接口。
+                    self.floating_image = synth_t
+                    print(f"[Env info] Using synthetic floating image from SANA. prompt={prompt[:60]}...")
+                    break
+
+                except Exception as e:
+                    print(f"[Env warn] SANA request failed: {e}. retry after {self.synth_retry_wait}s")
+                    time.sleep(self.synth_retry_wait)
+        # ------------------------------------------------
         self.ground_truth_matrix_inv = torch.linalg.inv(self.ground_truth_matrix)
         # 可选：每次 reset 时根据 rand_cfg 重新随机初始扰动
         if self.re_randomize_each_reset:
@@ -231,7 +347,7 @@ class ImgRegEnv(gym.Env):
         self.distance = self.get_distance()  # 获取初始距离
         if self.render_mode is not None:
             self._render_frame()
-        observation = self._get_obs()
+        observation = self._ensure_tensor_obs(self._get_obs())
         info = self._get_info()
         # print(f"[Env info]:Env Reset")
 
@@ -258,7 +374,7 @@ class ImgRegEnv(gym.Env):
                 reward = 100
                 print(f"[Env info]: Success!")
                 self.reward_history.append(reward)
-                observation = self._get_obs()
+                observation = self._ensure_tensor_obs(self._get_obs())
                 return observation, reward, True, False, info
             else:  # 配准没有结束，继续配准
                 (
@@ -296,7 +412,7 @@ class ImgRegEnv(gym.Env):
                         self.one_time_rewards[threshold] = True  # 标记为已领取
                         print(f"[Env info]: One-time reward of 50 for distance <= {threshold}!")
 
-                observation = self._get_obs()
+                observation = self._ensure_tensor_obs(self._get_obs())
                 if sign:
                     self.reward_history.append(reward)
                     self.history.append(action)
@@ -316,7 +432,7 @@ class ImgRegEnv(gym.Env):
         else:  # 到达结束回合的情况，或者图像全黑
             reward = -100
             self.reward_history.append(reward)
-            observation = self._get_obs()
+            observation = self._ensure_tensor_obs(self._get_obs())
             return (observation,
                     reward,
                     True, False, info)
