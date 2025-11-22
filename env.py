@@ -17,15 +17,13 @@ import gymnasium as gym
 import numpy as np
 from PIL import Image
 from gymnasium import spaces
-from utils import transform_key_points, transform_key_points_no_inv, count_distance, affine_2x3_to_3x3
+from utils import transform_key_points, transform_key_points_no_inv, count_distance, affine_2x3_to_3x3, get_sift_features
 from image_preprocess import move, preprocess_all_images, generate_affine_matrix_fixed, generate_random_affine_matrix, apply_affine_transform_cv2
 import matplotlib.pyplot as plt
 import torch
 import pygame
 import math
-import requests
-import time
-
+from api import request_sana_sample
 
 class ImgRegEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 25}
@@ -56,26 +54,19 @@ class ImgRegEnv(gym.Env):
         self.max_step = max_step
 
         self.observation_space = spaces.Box(  # 观测空间
-            low=0.0, high=255.0,  # 归一化后的数据的值域为[0,1]
-            shape=(2, 256, 256),  # 图像的高度、宽度和通道数
-            dtype=np.uint8
+            low=0.0, high=255.0,  # 当前 observation 未做 0-1 归一化，保持像素范围
+            shape=(3, 256, 256),  # (C, H, W)
+            dtype=np.float32
         )
 
         self.parallel = parallel  # 判断是否是多环境并行，如果是，数据加载方式会不一样
         self.save_path = save_path
         self.device = "cpu"  # 用于确定当前环境所处的设备
 
-        # -------- 合成数据 API 设置（写死在类内部） --------
-        self.synth_api_url = "http://192.168.31.155:8000/generate"  # Flask SANA 服务
-        self.synth_prob = 0.9                 # 每次 reset 走合成数据的概率
-        self.synth_retry_wait = 5            # 429 时等待秒数
-        self.synth_max_retries = 5           # 最大重试次数
-        self.synth_prompts = [
-            "Congo red stain of amyloid deposition, 20x. Salmon-pink extracellular deposits in vessel walls and stroma, realistic microscopy lighting.",
-            "H&E histopathology of colon adenocarcinoma, 40x. Irregular infiltrative glands, dirty necrosis, stromal desmoplasia, clinical photomicrograph.",
-            "PAS stain histopathology of kidney glomerulus, 40x. Bright magenta thickened basement membranes, sharp counterstain, minimal background."
-        ]
-        # ---------------------------------------------
+        # -------- 合成数据 API 设置 --------
+        self.synth_prob = 0.9  # 每次 reset 走合成数据的概率
+        # 其余网络请求/重试/提示词已挪到 api.py
+        # ---------------------------------
 
         # 随机扰动配置（可热更新）与 reset 重随机开关
         self.rand_cfg = rand_cfg or {"scale_variation": 0.2, "rotation_variation": 30, "translation_variation": 60}
@@ -159,6 +150,71 @@ class ImgRegEnv(gym.Env):
             return torch.from_numpy(obs)
         return obs
 
+    def _limit_kps(self, kps, max_n: int = 500):
+        """Limit number of keypoints to avoid excessive compute / memory.
+        Accepts None or (kps, desc) tuples; returns None if missing.
+        """
+        if kps is None:
+            return None
+        # Some upstream code may return (kps, desc) tuple.
+        if isinstance(kps, tuple) or isinstance(kps, list):
+            if len(kps) == 0:
+                return None
+            kps = kps[0]
+            if kps is None:
+                return None
+        kps = np.asarray(kps, dtype=np.float32)
+        if kps.ndim != 2:
+            kps = kps.reshape(-1, 2)
+        if kps.shape[1] != 2:
+            # malformed, drop
+            return None
+        if kps.shape[0] > max_n:
+            # Randomly subsample without replacement for diversity
+            idx = np.random.choice(kps.shape[0], size=max_n, replace=False)
+            kps = kps[idx]
+        return kps
+
+    def _request_synthetic_sample(self):
+        """向 SANA API 请求一张合成图，并构造一个完整的数据样本：
+        (reference_image, floating_image, ground_truth_image, ground_truth_matrix, gt_kps)
+
+        约定：API 返回的合成图作为 ground_truth/reference；
+        随机仿射 A 作用在 ground_truth 上生成 floating；
+        ground_truth_matrix 为 floating -> ground_truth 的 3x3 矩阵；
+        gt_kps 为 ground_truth 上的 SIFT 关键点。
+
+        网络请求/重试/提示词选择放在 api.py。
+        若请求失败则抛异常，由 reset() 兜底回退本地数据。
+        """
+        gt_np, prompt = request_sana_sample(
+            height=256,
+            width=256,
+            # 如需改默认重试参数，可传 retry_wait/max_retries/api_url/prompts
+        )
+
+        # 1) 合成图作为 GT
+        ground_truth_image = torch.from_numpy(gt_np).unsqueeze(0).float()  # (1,256,256)
+
+        # 2) reference_image：这里没有跨模态信息，先与 GT 保持一致
+        reference_image = ground_truth_image.clone()
+
+        # 3) 生成随机仿射 A: GT -> floating
+        A_2x3 = generate_random_affine_matrix(**(self.rand_cfg or {}))
+        A_3x3 = affine_2x3_to_3x3(A_2x3)
+        A_inv_3x3 = np.linalg.inv(A_3x3).astype(np.float32)  # floating -> GT
+        ground_truth_matrix = torch.from_numpy(A_inv_3x3).float()
+
+        # 4) 应用 A 得到 floating_image
+        floating_image = apply_affine_transform_cv2(ground_truth_image, A_2x3)
+
+        # 5) SIFT 关键点（在 GT 上提取）
+        gt_kps = get_sift_features(gt_np)
+        gt_kps = self._limit_kps(gt_kps, max_n=500)
+
+        print(f"[Env info] Using synthetic sample from SANA. prompt={prompt[:60]}...")
+        return reference_image, floating_image, ground_truth_image, ground_truth_matrix, gt_kps
+
     def _get_obs(self):
         """
         打包 observation：
@@ -183,6 +239,12 @@ class ImgRegEnv(gym.Env):
             if kps.shape[1] != 2:
                 # 列数不对直接全 0，避免莫名其妙炸掉
                 return np.zeros((target_n, 2), dtype=np.float32)
+
+            # Clip to canvas range to satisfy observation_space bounds
+            # (cu_kps may go negative or beyond 255 after affine.)
+            kps = np.nan_to_num(kps, nan=0.0, posinf=255.0, neginf=0.0)
+            kps[:, 0] = np.clip(kps[:, 0], 0.0, 255.0)
+            kps[:, 1] = np.clip(kps[:, 1], 0.0, 255.0)
 
             n = kps.shape[0]
             if n >= target_n:
@@ -277,54 +339,36 @@ class ImgRegEnv(gym.Env):
         }
         self.history = []
         self.reward_history = []
-        (
-            self.reference_image,
-            self.floating_image,
-            self.ground_truth_image,
-            self.ground_truth_matrix,
-            self.gt_kps
-         ) = self.dataloader()
-
         # --------- 概率性使用合成数据（API 生成） ---------
         if random.random() < self.synth_prob:
-            for attempt in range(self.synth_max_retries):
-                try:
-                    prompt = random.choice(self.synth_prompts)
-                    payload = {
-                        "prompt": prompt,
-                        "num_images": 1,
-                        "height": 256,
-                        "width": 256,
-                        "guidance_scale": 4.5,
-                        "num_inference_steps": 20,
-                    }
-                    resp = requests.post(self.synth_api_url, json=payload, timeout=180)
-
-                    if resp.status_code == 429:
-                        print(f"[Env warn] SANA busy (429). sleep {self.synth_retry_wait}s then retry... ({attempt+1}/{self.synth_max_retries})")
-                        time.sleep(self.synth_retry_wait)
-                        continue
-
-                    resp.raise_for_status()
-
-                    # API 单图返回 image/png；按 256x256 灰度读入
-                    pil_img = Image.open(io.BytesIO(resp.content)).convert("L")
-                    if pil_img.size != (256, 256):
-                        pil_img = pil_img.resize((256, 256), Image.BILINEAR)
-
-                    synth_np = np.array(pil_img, dtype=np.uint8)
-                    synth_t = torch.from_numpy(synth_np).unsqueeze(0)  # (1,256,256)
-
-                    # 用合成图替换 floating_image；其余 GT/kps 仍沿用本地数据
-                    # 这样实现“真实+合成”混合训练，同时不破坏奖励/接口。
-                    self.floating_image = synth_t
-                    print(f"[Env info] Using synthetic floating image from SANA. prompt={prompt[:60]}...")
-                    break
-
-                except Exception as e:
-                    print(f"[Env warn] SANA request failed: {e}. retry after {self.synth_retry_wait}s")
-                    time.sleep(self.synth_retry_wait)
+            try:
+                (
+                    self.reference_image,
+                    self.floating_image,
+                    self.ground_truth_image,
+                    self.ground_truth_matrix,
+                    self.gt_kps
+                ) = self._request_synthetic_sample()
+            except Exception as e:
+                print(f"[Env warn] Synthetic sample failed, fallback to local dataloader: {e}")
+                (
+                    self.reference_image,
+                    self.floating_image,
+                    self.ground_truth_image,
+                    self.ground_truth_matrix,
+                    self.gt_kps
+                ) = self.dataloader()
+        else:
+            (
+                self.reference_image,
+                self.floating_image,
+                self.ground_truth_image,
+                self.ground_truth_matrix,
+                self.gt_kps
+            ) = self.dataloader()
         # ------------------------------------------------
+        # Limit keypoints count early to keep distance / kps_h stable
+        self.gt_kps = self._limit_kps(self.gt_kps, max_n=500)
         self.ground_truth_matrix_inv = torch.linalg.inv(self.ground_truth_matrix)
         # 可选：每次 reset 时根据 rand_cfg 重新随机初始扰动
         if self.re_randomize_each_reset:
@@ -347,7 +391,7 @@ class ImgRegEnv(gym.Env):
         self.distance = self.get_distance()  # 获取初始距离
         if self.render_mode is not None:
             self._render_frame()
-        observation = self._ensure_tensor_obs(self._get_obs())
+        observation = self._get_obs()
         info = self._get_info()
         # print(f"[Env info]:Env Reset")
 
@@ -374,7 +418,7 @@ class ImgRegEnv(gym.Env):
                 reward = 100
                 print(f"[Env info]: Success!")
                 self.reward_history.append(reward)
-                observation = self._ensure_tensor_obs(self._get_obs())
+                observation = self._get_obs()
                 return observation, reward, True, False, info
             else:  # 配准没有结束，继续配准
                 (
@@ -412,7 +456,7 @@ class ImgRegEnv(gym.Env):
                         self.one_time_rewards[threshold] = True  # 标记为已领取
                         print(f"[Env info]: One-time reward of 50 for distance <= {threshold}!")
 
-                observation = self._ensure_tensor_obs(self._get_obs())
+                observation = self._get_obs()
                 if sign:
                     self.reward_history.append(reward)
                     self.history.append(action)
@@ -432,7 +476,7 @@ class ImgRegEnv(gym.Env):
         else:  # 到达结束回合的情况，或者图像全黑
             reward = -100
             self.reward_history.append(reward)
-            observation = self._ensure_tensor_obs(self._get_obs())
+            observation = self._get_obs()
             return (observation,
                     reward,
                     True, False, info)
