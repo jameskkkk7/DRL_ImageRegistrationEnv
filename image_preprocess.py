@@ -5,6 +5,79 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+def apply_random_nonrigid_torch(
+    image: torch.Tensor,
+    max_disp: float = 2.0,
+    smooth_sigma: float = 8.0,
+    seed: int = None,
+    padding_mode: str = "border",
+):
+    """
+    对 (1,H,W) 的 CPU tensor 施加一个平滑的小非刚性形变场。
+
+    image: torch.Tensor (1,H,W), CPU, float32/uint8
+    max_disp: 位移幅度（像素级，建议 1-3）
+    smooth_sigma: 高斯平滑 sigma，越大越“柔”
+    """
+    assert image.ndim == 3 and image.shape[0] == 1, f"expected (1,H,W), got {tuple(image.shape)}"
+    H, W = int(image.shape[1]), int(image.shape[2])
+
+    # RNG
+    if seed is not None:
+        g = torch.Generator(device='cpu')
+        g.manual_seed(int(seed))
+        noise_x = torch.randn((H, W), generator=g, device='cpu')
+        noise_y = torch.randn((H, W), generator=g, device='cpu')
+    else:
+        noise_x = torch.randn((H, W), device='cpu')
+        noise_y = torch.randn((H, W), device='cpu')
+
+    # 用 cv2 高斯模糊做平滑（避免引入 scipy）
+    nx = noise_x.numpy().astype(np.float32)
+    ny = noise_y.numpy().astype(np.float32)
+    k = int(2 * round(smooth_sigma * 3) + 1)  # ~6 sigma window
+    k = max(k, 3)
+    if k % 2 == 0:
+        k += 1
+    nx = cv2.GaussianBlur(nx, (k, k), smooth_sigma)
+    ny = cv2.GaussianBlur(ny, (k, k), smooth_sigma)
+
+    # 归一化 + 缩放到像素位移
+    nx = nx / (np.std(nx) + 1e-6) * max_disp
+    ny = ny / (np.std(ny) + 1e-6) * max_disp
+
+    disp_x = torch.from_numpy(nx)
+    disp_y = torch.from_numpy(ny)
+
+    # base grid in [-1,1]
+    yy, xx = torch.meshgrid(
+        torch.linspace(-1.0, 1.0, H, device='cpu'),
+        torch.linspace(-1.0, 1.0, W, device='cpu'),
+        indexing='ij'
+    )
+
+    # 像素位移 -> 归一化位移
+    disp_x_norm = disp_x * (2.0 / max(W - 1, 1))
+    disp_y_norm = disp_y * (2.0 / max(H - 1, 1))
+
+    grid = torch.stack([xx + disp_x_norm, yy + disp_y_norm], dim=-1)  # (H,W,2)
+
+    # sample
+    orig_dtype = image.dtype
+    img = image.to(dtype=torch.float32, device='cpu').unsqueeze(0)  # (1,1,H,W)
+    out = F.grid_sample(
+        img,
+        grid.unsqueeze(0),
+        mode='bilinear',
+        padding_mode=padding_mode,
+        align_corners=True,
+    ).squeeze(0)  # (1,H,W)
+
+    if orig_dtype in (torch.uint8, torch.int16, torch.int32, torch.int64):
+        out = out.clamp(0.0, 255.0).round().to(dtype=torch.uint8)
+    return out
+
 def apply_affine_transform_torch(image, affine_matrix, output_size=(256, 256)):
     """
     Apply an affine transformation to an image using pure PyTorch on CPU.

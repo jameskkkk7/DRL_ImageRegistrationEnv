@@ -18,7 +18,7 @@ import numpy as np
 from PIL import Image
 from gymnasium import spaces
 from utils import transform_key_points, transform_key_points_no_inv, count_distance, affine_2x3_to_3x3, get_sift_features
-from image_preprocess import move, preprocess_all_images, generate_affine_matrix_fixed, generate_random_affine_matrix, apply_affine_transform_cv2
+from image_preprocess import move, preprocess_all_images, generate_affine_matrix_fixed, generate_random_affine_matrix, apply_affine_transform_cv2, apply_random_nonrigid_torch
 import matplotlib.pyplot as plt
 import torch
 import pygame
@@ -66,6 +66,16 @@ class ImgRegEnv(gym.Env):
         # -------- 合成数据 API 设置 --------
         self.synth_prob = 0.9  # 每次 reset 走合成数据的概率
         # 其余网络请求/重试/提示词已挪到 api.py
+        # ---------------------------------
+
+        # -------- 非刚性微小形变设置（可选）--------
+        # 为 floating/current_floating 叠加一个平滑小位移场（模拟切片褶皱/漂移）
+        # 注意：一旦开启，图像关系不再是纯仿射，reward 仍按仿射矩阵距离会带一点噪声。
+        self.nonrigid_prob = 1.0  # 默认关闭；>0 以概率启用
+        self.nonrigid_cfg = {
+            "max_disp": 3.0,      # 像素级形变幅度（建议 1-3）
+            "smooth_sigma": 20.0, # 平滑程度（越大越平滑）
+        }
         # ---------------------------------
 
         # 随机扰动配置（可热更新）与 reset 重随机开关
@@ -207,6 +217,15 @@ class ImgRegEnv(gym.Env):
 
         # 4) 应用 A 得到 floating_image
         floating_image = apply_affine_transform_cv2(ground_truth_image, A_2x3)
+
+        # 4.5) 可选：叠加微小非刚性形变场
+        if self.nonrigid_prob > 0 and random.random() < self.nonrigid_prob:
+            floating_image = apply_random_nonrigid_torch(
+                floating_image,
+                max_disp=self.nonrigid_cfg.get("max_disp", 2.0),
+                smooth_sigma=self.nonrigid_cfg.get("smooth_sigma", 8.0),
+                seed=None,
+            )
 
         # 5) SIFT 关键点（在 GT 上提取）
         gt_kps = get_sift_features(gt_np)
@@ -379,6 +398,14 @@ class ImgRegEnv(gym.Env):
             self.ground_truth_matrix = torch.from_numpy(A_inv_3x3).float()
             self.ground_truth_matrix_inv = torch.from_numpy(A_3x3).float()
             self.floating_image = apply_affine_transform_cv2(self.ground_truth_image, A_2x3)
+            # 可选：每次 reset 重新随机仿射后，也叠加一次微小非刚性形变
+            if self.nonrigid_prob > 0 and random.random() < self.nonrigid_prob:
+                self.floating_image = apply_random_nonrigid_torch(
+                    self.floating_image,
+                    max_disp=self.nonrigid_cfg.get("max_disp", 2.0),
+                    smooth_sigma=self.nonrigid_cfg.get("smooth_sigma", 8.0),
+                    seed=None,
+                )
         # Precompute once per episode: transform gt_kps by GT inverse and cache homogeneous coordinates
         self.kps = transform_key_points_no_inv(self.gt_kps, self.ground_truth_matrix_inv)
         self.kps_h = np.hstack([
